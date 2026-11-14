@@ -1,0 +1,11 @@
+# 本地签名材料 / 密钥文件，禁止提交
+sfa-sfl-secrets/
+secrets/
+*.keystore
+*.b64
+*.p12
+*.asc
+
+# Python 运行缓存
+__pycache__/
+*.pyc

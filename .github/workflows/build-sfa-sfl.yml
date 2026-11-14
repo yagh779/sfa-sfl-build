@@ -1,0 +1,402 @@
+name: Build SFA & SFL (sing-box reF1nd / xiaobaf14g)
+
+# Builds the graphical clients for one or both variants:
+#   SFA  = Android GUI  (sing-box-for-android  -> *.apk, arm64 only, standard flavor)
+#   SFL  = Linux   GUI  (sing-box-for-desktop  -> *.deb,  amd64 only)
+#
+# The GUI clients are built from source against a specific core commit:
+#   * SFA embeds the core as a gomobile AAR (libbox.aar) built by build_libbox.
+#   * SFL's Electron app locates the core at <client>/../.. (go.mod module
+#     github.com/sagernet/sing-box) and compiles the daemon with build_boxdd.
+# So every job checks the core repo out at the workspace root and nests the
+# client repo under it before building.
+#
+# Build tags: no `with_naive_outbound` anywhere.
+#   * SFL daemon (build_boxdd) picks release/DEFAULT_BUILD_TAGS_OTHERS when cgo
+#     is off — which happens when CC is empty. We leave CC empty on purpose, so
+#     OTHERS tags (no naive) are used and the whole cronet-go/Chromium toolchain
+#     is unnecessary.
+#   * SFA libbox (build_libbox) hardcodes its tag list and has no CLI switch, so
+#     scripts/patch_build_libbox.py rewrites sharedTags to the fixed set and
+#     removes the legacy (API 21) build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: 'Build which variant'
+        required: true
+        type: choice
+        default: both
+        options:
+          - both
+          - xiaobaf14g
+          - reF1nd
+      version:
+        description: 'Version string (no leading v), e.g. 1.15.0-alpha.13-xiaobaf14g.11 or 1.15.0-alpha.13'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark the GitHub Release as prerelease'
+        required: false
+        type: boolean
+        default: true
+      publish:
+        description: 'Create / update a GitHub Release with the artifacts'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-sfa-sfl-${{ github.ref }}-${{ inputs.variant }}-${{ inputs.version }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.27.1'
+  NDK_VERSION: r28c
+  # Fixed build tag set for BOTH artifacts and BOTH variants (no with_naive_outbound).
+  BUILD_TAGS: 'with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkname,tfogo_checklinkname0'
+
+jobs:
+  # ── resolve inputs into fully-enumerated matrices ──────────────────
+  resolve:
+    name: resolve matrices
+    runs-on: ubuntu-latest
+    outputs:
+      sfa: ${{ steps.m.outputs.sfa }}
+      sfl: ${{ steps.m.outputs.sfl }}
+      tag: ${{ steps.m.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build matrix JSON
+        id: m
+        env:
+          VARIANT: ${{ inputs.variant }}
+          VERSION: ${{ inputs.version }}
+        run: python3 scripts/matrix.py
+
+  # ── 1) SFA: build libbox (arm64) + assemble signed standard APK ─────
+  sfa:
+    name: SFA ${{ matrix.variant }} (arm64)
+    runs-on: ubuntu-latest
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.sfa) }}
+    steps:
+      - name: Checkout core (${{ matrix.core_repo }}@${{ matrix.core_ref }})
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.core_repo }}
+          ref: ${{ matrix.core_ref }}
+          fetch-depth: 0
+      - name: Checkout SFA client
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.sfa_repo }}
+          ref: ${{ matrix.sfa_ref }}
+          path: sfa-client
+          submodules: recursive
+      - name: Checkout builder scripts
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository }}
+          path: .ci
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Setup OpenJDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Locate preinstalled NDK (r28+)
+        id: ndk_local
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          NDK=""
+          for dir in $(ls -d "$SDK"/ndk/*/ 2>/dev/null | sort -V -r); do
+            dir="${dir%/}"
+            major=$(basename "$dir" | cut -d. -f1)
+            if [[ "$major" =~ ^[0-9]+$ ]] && [ "$major" -ge 28 ] && \
+               [ -x "$dir/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+              NDK="$dir"; break
+            fi
+          done
+          echo "path=$NDK" >> "$GITHUB_OUTPUT"
+      - name: Setup NDK (download fallback)
+        id: ndk_download
+        if: steps.ndk_local.outputs.path == ''
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+      - name: Apply fixed build tags to build_libbox
+        env:
+          BUILD_TAGS: ${{ env.BUILD_TAGS }}
+        run: |
+          set -euo pipefail
+          # build_libbox hardcodes its tag list (no CLI switch). Rewrite it to the
+          # fixed tag set (no with_naive_outbound).
+          python3 .ci/scripts/patch_build_libbox.py
+          echo "--- build_libbox sharedTags (after patch) ---"
+          grep -n 'sharedTags = ' cmd/internal/build_libbox/main.go | head -n5
+      - name: Build libbox (arm64, no naive)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk_local.outputs.path || steps.ndk_download.outputs.ndk-path }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          git tag -f "v${VERSION}"          # build_libbox reads version via git describe
+          make lib_install
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          go run ./cmd/internal/build_libbox -target android -platform android/arm64
+          ls -lh libbox.aar
+          mkdir -p sfa-client/app/libs
+          cp libbox.aar sfa-client/app/libs/libbox.aar
+          ls -lh sfa-client/app/libs
+      - name: Update version.properties
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          FILE=sfa-client/version.properties
+          BASE_CODE=$(sed -n 's/^VERSION_CODE=//p' "$FILE")
+          VERSION_CODE=$((BASE_CODE + RUN_NUMBER))
+          sed -i \
+            -e "s/^VERSION_CODE=.*/VERSION_CODE=${VERSION_CODE}/" \
+            -e "s/^VERSION_NAME=.*/VERSION_NAME=${VERSION}/" \
+            -e "s/^GO_VERSION=.*/GO_VERSION=$(go env GOVERSION)/" \
+            "$FILE"
+          cat "$FILE"
+          echo "code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+      - name: Build APK (arm64, other flavor)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk_local.outputs.path || steps.ndk_download.outputs.ndk-path }}
+          RELEASE_KEYSTORE_FILE: ${{ secrets.SFA_KEYSTORE_FILE }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.SFA_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.SFA_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.SFA_KEY_PASSWORD }}
+          TASK: ${{ matrix.task }}
+        run: |
+          set -euo pipefail
+          for NAME in RELEASE_KEYSTORE_FILE RELEASE_KEYSTORE_PASSWORD RELEASE_KEY_ALIAS RELEASE_KEY_PASSWORD; do
+            [ -n "${!NAME}" ] || { echo "::error::secret ${NAME} is not configured"; exit 1; }
+          done
+          KEYSTORE="$RUNNER_TEMP/release.keystore"
+          printf '%s' "$RELEASE_KEYSTORE_FILE" | base64 -d > "$KEYSTORE"
+          cd sfa-client
+          chmod +x gradlew
+          ./gradlew --build-cache --parallel "$TASK" \
+            -Pandroid.injected.build.abi=arm64-v8a \
+            -Pandroid.injected.signing.store.file="$KEYSTORE" \
+            -Pandroid.injected.signing.store.password="$RELEASE_KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$RELEASE_KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$RELEASE_KEY_PASSWORD"
+      - name: Prepare upload
+        env:
+          VARIANT: ${{ matrix.variant }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          SRC=sfa-client/app/build/outputs/apk/other/release
+          mkdir -p dist
+          pick=$(ls "$SRC"/*arm64-v8a*.apk 2>/dev/null | head -n1 || true)
+          [ -z "$pick" ] && pick=$(ls "$SRC"/*universal*.apk 2>/dev/null | head -n1 || true)
+          [ -z "$pick" ] && pick=$(ls "$SRC"/*.apk 2>/dev/null | head -n1 || true)
+          [ -n "$pick" ] || { echo "::error::no APK found under $SRC"; exit 1; }
+          cp "$pick" "dist/SFA-${VERSION}-arm64-${VARIANT}.apk"
+          ls -lh dist
+      - name: Upload APK
+        uses: actions/upload-artifact@v5
+        with:
+          name: sfa-${{ matrix.variant }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  # ── 2) SFL: Linux amd64 .deb only, no naive (no cronet toolchain) ──
+  sfl:
+    name: SFL ${{ matrix.variant }} (amd64 deb)
+    runs-on: ubuntu-26.04
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.sfl) }}
+    steps:
+      - name: Checkout core (${{ matrix.core_repo }}@${{ matrix.core_ref }})
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.core_repo }}
+          ref: ${{ matrix.core_ref }}
+          fetch-depth: 0
+      - name: Checkout SFL client
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.sfl_repo }}
+          ref: ${{ matrix.sfl_ref }}
+          path: clients/desktop
+          submodules: recursive
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: ${{ matrix.rust_target }}
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: clients/desktop/package.json
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: clients/desktop/package.json
+          cache: pnpm
+          cache-dependency-path: |
+            clients/desktop/pnpm-lock.yaml
+            clients/desktop/dashboard/pnpm-lock.yaml
+      - name: Update version.json
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          jq --arg version "$VERSION" --arg go "$(go env GOVERSION)" \
+            '.version = $version | .go_version = $go' \
+            clients/desktop/version.json > "$RUNNER_TEMP/version.json"
+          mv "$RUNNER_TEMP/version.json" clients/desktop/version.json
+          cat clients/desktop/version.json
+      - name: Pin core tag (build_boxdd reads version via git describe)
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          git tag -f "v${VERSION}"
+      - name: Force fixed build tags (no naive)
+        env:
+          BUILD_TAGS: ${{ env.BUILD_TAGS }}
+        run: |
+          set -euo pipefail
+          # build_boxdd reads release/DEFAULT_BUILD_TAGS_OTHERS when cgo is off
+          # (CC empty). Force the exact tag set so no with_naive_outbound is used.
+          printf '%s' "$BUILD_TAGS" > release/DEFAULT_BUILD_TAGS_OTHERS
+          printf '%s' "$BUILD_TAGS" > release/DEFAULT_BUILD_TAGS
+          echo "release/DEFAULT_BUILD_TAGS_OTHERS = $(cat release/DEFAULT_BUILD_TAGS_OTHERS)"
+      - name: Install package tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update || true
+          sudo apt-get install -y debsigs libarchive-tools
+      - name: Install dependencies
+        run: pnpm -C clients/desktop install --frozen-lockfile
+      - name: Build .deb (amd64, no naive)
+        env:
+          # Empty CC => build_boxdd uses DEFAULT_BUILD_TAGS_OTHERS (no naive) and CGO off,
+          # so no cronet-go / Chromium toolchain is required.
+          CC: ''
+          CGO_ENABLED: '0'
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm -C clients/desktop package:linux -- deb ${{ matrix.desktop_arch }}
+      - name: Setup package signing
+        env:
+          GPG_KEY: ${{ secrets.GPG_KEY }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          for NAME in GPG_KEY GPG_KEY_ID GPG_PASSPHRASE; do
+            [ -n "${!NAME}" ] || { echo "::error::secret ${NAME} is not configured"; exit 1; }
+          done
+          SIGNING_GNUPG_HOME="$RUNNER_TEMP/package-signing-gnupg"
+          SIGNING_PASSPHRASE_FILE="$RUNNER_TEMP/package-signing-passphrase"
+          mkdir -m 700 "$SIGNING_GNUPG_HOME"
+          printf '%s' "$GPG_PASSPHRASE" > "$SIGNING_PASSPHRASE_FILE"
+          chmod 600 "$SIGNING_PASSPHRASE_FILE"
+          {
+            echo "GNUPGHOME=$SIGNING_GNUPG_HOME"
+            echo "SIGNING_PASSPHRASE_FILE=$SIGNING_PASSPHRASE_FILE"
+          } >> "$GITHUB_ENV"
+          printf '%s' "$GPG_KEY" | gpg \
+            --homedir "$SIGNING_GNUPG_HOME" \
+            --batch --pinentry-mode loopback \
+            --passphrase-file "$SIGNING_PASSPHRASE_FILE" --import
+          gpg --homedir "$SIGNING_GNUPG_HOME" --batch --list-secret-keys "$GPG_KEY_ID" >/dev/null
+      - name: Sign .deb
+        env:
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          debsigs \
+            --sign=origin \
+            -k "$GPG_KEY_ID" \
+            --gpgopts "--batch --pinentry-mode loopback --passphrase-file $SIGNING_PASSPHRASE_FILE" \
+            clients/desktop/release/SFL-*.deb
+      - name: Prepare upload
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(clients/desktop/release/SFL-*.deb)
+          if (( ${#debs[@]} != 1 )); then
+            echo "::error::expected 1 .deb, found ${#debs[@]}: ${debs[*]}"
+            exit 1
+          fi
+          mkdir -p dist
+          cp "${debs[0]}" "dist/${VARIANT}-$(basename "${debs[0]}")"
+          ls -lh dist
+      - name: Upload .deb
+        uses: actions/upload-artifact@v5
+        with:
+          name: sfl-${{ matrix.variant }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  # ── 3) Publish a single Release with everything ────────────────────
+  publish:
+    name: publish release
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    needs: [resolve, sfa, sfl]
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: builds
+          merge-multiple: true
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          name: sing-box SFA/SFL ${{ inputs.version }}
+          prerelease: ${{ inputs.prerelease }}
+          draft: false
+          files: builds/*
+          fail_on_unmatched_files: true
