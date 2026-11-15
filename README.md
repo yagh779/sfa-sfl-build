@@ -63,7 +63,8 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkna
 ├── .github/workflows/build-sfa-sfl.yml   # 唯一工作流
 ├── scripts/
 │   ├── matrix.py                          # 由输入生成 prepare / sfa / sfl 矩阵与 version / meta / tag
-│   └── patch_build_libbox.py              # 重写 build_libbox 的标签并移除 legacy 构建
+│   ├── patch_build_libbox.py              # 重写 build_libbox 的标签并移除 legacy 构建
+│   └── restrict_abi.py                    # 改写客户端 splits.abi，仅构建 arm64-v8a
 ├── .gitignore
 └── README.md
 ```
@@ -114,7 +115,7 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkna
 - `resolve`：`scripts/matrix.py` 生成 `prepare` / `sfa` / `sfl` 矩阵，以及 `version` / `meta` / `tag` 输出。
 - `prepare`：按变体用 `go list -deps` 预热 `~/go/pkg/mod` 模块缓存（`lookup-only` 保存，供后续 job 与后续运行复用；预热步骤失败仅告警）。
 - `sfa-lib`：检出 core + 构建脚本 → `patch_build_libbox.py`（改标签、去 legacy）→ `make lib_install` + `build_libbox`（android/arm64）→ 上传 `libbox.aar`。
-- `sfa`：检出客户端 → 下载 `libbox.aar` 放入 `app/libs` → 更新 `version.properties` → 注入签名 → `./gradlew assembleOtherRelease -Pandroid.injected.build.abi=arm64-v8a` → 上传 APK。
+- `sfa`：检出客户端 + 构建脚本 → `restrict_abi.py`（把 `splits.abi` 限定为仅 `arm64-v8a`）→ 下载 `libbox.aar` 放入 `app/libs` → 更新 `version.properties` → 注入签名 → `./gradlew assembleOtherRelease`（不再传 `-Pandroid.injected.build.abi`）→ 上传 APK。
 - `sfl`：检出 core + 客户端 → 覆盖 `release/DEFAULT_BUILD_TAGS*` → Rust/Zig（wayland 原生模块）→ `pnpm package:linux -- deb x64`（`CC` 空、无 cronet）→ `debsigs` 签名 → 上传 `.deb`。
 - `publish`：汇总 apk / deb，生成发布页（名称、版本、构建标签、变体、来源 refs、产物表）并创建 / 更新 Release。单产物（`target=sfa`/`sfl`）运行也会发布。
 
@@ -136,7 +137,7 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkna
 ## 已知限制
 
 - reF1nd 的客户端仓库无 `reF1nd-testing-next` 分支，故 core 使用 `reF1nd-testing-next`，SFA 使用 `reF1nd-testing`，SFL 使用 `reF1nd-dev`。
-- SFA 通过 `-Pandroid.injected.build.abi=arm64-v8a` 限定 ABI；若 AGP 未识别该属性，上传的 universal APK 的 JNI 仍仅含 arm64。
+- SFA 通过 [scripts/restrict_abi.py](scripts/restrict_abi.py) 在构建前改写客户端 `app/build.gradle.kts` 的 `splits.abi.include(...)` 为仅 `arm64-v8a`（同时 `isUniversalApk=false`），从而只编 arm64、产物正常落在 `app/build/outputs/apk/other/release/`。不再使用 `-Pandroid.injected.build.abi`——该 IDE 注入式参数会把产物导向 `intermediates/`、不产生可收集的签名 APK（曾导致「构建成功却找不到 APK」）。
 - [patch_build_libbox.py](scripts/patch_build_libbox.py) 依赖 `build_libbox` 源码中 `sharedTags` 与 legacy 构建的既有结构；若上游改写导致不匹配，脚本会打印告警并按现状继续。
 - `build_libbox` 需 `make lib_install` 目标与 Android NDK r28+。
 - 固定标签集按需求去掉了上游 `sharedTags` 中的 `with_naive_outbound`，同时也去掉了 `ts_omit_*`、`with_wireguard`/`with_openvpn`/`with_openconnect`/`with_usbip` 等；因此产物不含这些特性，且 tailscale 以全特性编译（体积增大）。若 Android 端 `libbox.aar` 因缺少 `ts_omit_*` 相关依赖而编译失败，可在 `env.BUILD_TAGS` 末尾补回 `ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird`。

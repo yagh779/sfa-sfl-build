@@ -268,6 +268,17 @@ jobs:
           ref: ${{ matrix.sfa_ref }}
           path: sfa-client
           submodules: recursive
+      - name: Checkout builder scripts
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ${{ github.repository }}
+          path: .ci
+      - name: Restrict ABI to arm64-v8a
+        run: |
+          set -euo pipefail
+          python3 .ci/scripts/restrict_abi.py sfa-client/app/build.gradle.kts
+          echo "--- splits.abi (after patch) ---"
+          grep -n -A6 'splits {' sfa-client/app/build.gradle.kts | head -n 10
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
@@ -345,9 +356,9 @@ jobs:
           printf '%s' "$RELEASE_KEYSTORE_FILE" | base64 -d > "$KEYSTORE"
           cd sfa-client
           chmod +x gradlew
-          # 不限定 abi：`-Pandroid.injected.build.abi` 属 IDE 注入式构建，会把产物导向
-          # intermediates 且不在 outputs/apk 生成可签名/可收集的 APK；改为按客户端默认
-          # splits 构建 other 全部 ABI，产物落在 app/build/outputs/apk/other/release/。
+          # ABI 已在前面「Restrict ABI to arm64-v8a」步骤里通过改写 splits.abi 限定为仅 arm64-v8a，
+          # 故这里不再传 `-Pandroid.injected.build.abi`（该 IDE 注入式参数会把产物导向 intermediates，
+          # 不在 outputs/apk 生成可签名/可收集的 APK）。此处仅注入签名属性。
           ./gradlew --build-cache --parallel "$TASK" \
             -Pandroid.injected.signing.store.file="$KEYSTORE" \
             -Pandroid.injected.signing.store.password="$RELEASE_KEYSTORE_PASSWORD" \
