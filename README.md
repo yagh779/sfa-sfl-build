@@ -14,7 +14,7 @@
 | xiaobaf14g | `MiChongs/sing-box@xiaobaf14g-testing` | `MiChongs/sing-box-for-android@xiaobaf14g-testing` | `MiChongs/sing-box-for-desktop@xiaobaf14g-dev` |
 | reF1nd | `reF1nd/sing-box@reF1nd-testing-next` | `reF1nd/sing-box-for-android@reF1nd-testing` | `reF1nd/sing-box-for-desktop@reF1nd-dev` |
 
-两个变体分别源自不同维护者的分支；同一变体下，SFA / SFL 与对应 core 使用同一版本号，保证版本对齐。
+两个变体分别源自不同维护者的分支，版本号各自独立（可不同）；同一变体下，SFA / SFL 与对应 core 使用同一版本号，保证版本对齐。
 
 ## 构建产物
 
@@ -112,7 +112,7 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkna
 
 ## 工作流结构
 
-- `resolve`：`scripts/matrix.py` 生成 `prepare` / `sfa` / `sfl` 矩阵，以及 `version` / `meta` / `tag` 输出。
+- `resolve`：`scripts/matrix.py` 生成 `prepare` / `sfa` / `sfl` 矩阵，以及 `meta` / `tag` 输出（每个变体及其独立版本号封装在 `meta` 中）。
 - `prepare`：按变体用 `go list -deps` 预热 `~/go/pkg/mod` 模块缓存（`lookup-only` 保存，供后续 job 与后续运行复用；预热步骤失败仅告警）。
 - `sfa-lib`：检出 core + 构建脚本 → `patch_build_libbox.py`（改标签、去 legacy）→ `make lib_install` + `build_libbox`（android/arm64）→ 上传 `libbox.aar`。
 - `sfa`：检出客户端 + 构建脚本 → `restrict_abi.py`（把 `splits.abi` 限定为仅 `arm64-v8a`）→ 下载 `libbox.aar` 放入 `app/libs` → 更新 `version.properties` → 注入签名 → `./gradlew assembleOtherRelease`（不再传 `-Pandroid.injected.build.abi`）→ 上传 APK。
@@ -121,11 +121,14 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkna
 
 ## 缓存与加速
 
-- **Go**：`prepare` 预热 `~/go/pkg/mod`，各构建 job `actions/cache/restore` 复用；`~/.cache/go-build` 按 `go.sum` + variant + SHA 缓存并 `restore-keys` 回退。
+- **Go 模块**：`prepare` 按变体用 `go list -deps` 预热 `~/go/pkg/mod`（`lookup-only` 保存），各构建 job 只 `actions/cache/restore` 复用。
+- **Go 编译缓存**：`~/.cache/go-build`，SFA / SFL 各自 `actions/cache`；主 key 按 `go.sum` + tags + variant（**不含提交 SHA**，只在依赖变化时才新增条目，避免随每次提交膨胀）；`restore-keys` 以 `gobuild-$os-<job>-<variant>-` 前缀回退，因此即便 `go.sum` 变化也能命中最近一次缓存、保持增量编译。
 - **Gradle**：`gradle/actions/setup-gradle`（`cache-provider: basic`）。
 - **pnpm / Node**：`actions/setup-node` 的 pnpm store 缓存 + `~/.cache/electron`、`~/.cache/electron-builder`。
-- **Rust / Zig**：`~/.cargo/registry`、`~/.cargo/git`、`clients/desktop/bin/wayland-menu-toolchain`、`~/.cache/zig`。
-- 所有 Actions 均钉到 commit SHA；各 job 设 `timeout-minutes`；`concurrency` 取消同参数的并发旧运行。
+- **Rust**：`~/.cargo/registry`、`~/.cargo/git`、`clients/desktop/bin/wayland-menu-toolchain`（按 `Cargo.lock`）。
+- **Zig**：由 `mlugg/setup-zig` 自带缓存负责（早期基于 `~/.cache/zig` 的显式缓存步骤因该路径不存在恒 miss，已删除）。
+- **容量与淘汰**：GitHub Actions 缓存按仓库计，上限 **10 GiB**，超出按 LRU 淘汰；另有「7 天未访问自动清除」。当前占用远低于上限。
+- 所有 Actions 均钉到 commit SHA；各 job 设 `timeout-minutes`；`concurrency` 取消同参数并发旧运行；artifact 保留 7 天。
 
 ## 资源与运行器要求
 
@@ -140,7 +143,8 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkna
 - SFA 通过 [scripts/restrict_abi.py](scripts/restrict_abi.py) 在构建前改写客户端 `app/build.gradle.kts` 的 `splits.abi.include(...)` 为仅 `arm64-v8a`（同时 `isUniversalApk=false`），从而只编 arm64、产物正常落在 `app/build/outputs/apk/other/release/`。不再使用 `-Pandroid.injected.build.abi`——该 IDE 注入式参数会把产物导向 `intermediates/`、不产生可收集的签名 APK（曾导致「构建成功却找不到 APK」）。
 - [patch_build_libbox.py](scripts/patch_build_libbox.py) 依赖 `build_libbox` 源码中 `sharedTags` 与 legacy 构建的既有结构；若上游改写导致不匹配，脚本会打印告警并按现状继续。
 - `build_libbox` 需 `make lib_install` 目标与 Android NDK r28+。
-- 固定标签集按需求去掉了上游 `sharedTags` 中的 `with_naive_outbound`，同时也去掉了 `ts_omit_*`、`with_wireguard`/`with_openvpn`/`with_openconnect`/`with_usbip` 等；因此产物不含这些特性，且 tailscale 以全特性编译（体积增大）。若 Android 端 `libbox.aar` 因缺少 `ts_omit_*` 相关依赖而编译失败，可在 `env.BUILD_TAGS` 末尾补回 `ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird`。
+- 固定标签集按需求去掉了上游 `sharedTags` 中的 `with_naive_outbound`，同时也去掉了 `ts_omit_*`、`with_wireguard`/`with_openvpn`/`with_openconnect`/`with_usbip` 等；因此产物不含这些特性，且 tailscale 以全特性编译（体积增大）。当前标签集下 SFA（libbox.aar）与 SFL 均已实测可成功编译；若后续上游改动导致 Android 端 `libbox.aar` 因缺少 `ts_omit_*` 相关依赖编译失败，可在 `env.BUILD_TAGS` 末尾补回 `ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird`。
+- 构建源码始终跟随各上游分支的最新提交（branch ref，不做 SHA 钉定）；`version_*` 输入仅用于命名与版本元数据，**不改变拉取/编译的代码**。因此相同输入在不同时间构建可能对应不同上游代码。若需可复现构建，可将 `scripts/matrix.py` 中的 `*_ref` 固定为具体 commit SHA / tag。
 
 ## 许可证与致谢
 
