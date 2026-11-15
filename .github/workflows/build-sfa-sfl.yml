@@ -328,7 +328,7 @@ jobs:
             "$FILE"
           cat "$FILE"
           echo "code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
-      - name: Build APK (arm64, other flavor)
+      - name: Build APK (other flavor)
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk_local.outputs.path || steps.ndk_download.outputs.ndk-path }}
           RELEASE_KEYSTORE_FILE: ${{ secrets.SFA_KEYSTORE_FILE }}
@@ -345,8 +345,10 @@ jobs:
           printf '%s' "$RELEASE_KEYSTORE_FILE" | base64 -d > "$KEYSTORE"
           cd sfa-client
           chmod +x gradlew
+          # 不限定 abi：`-Pandroid.injected.build.abi` 属 IDE 注入式构建，会把产物导向
+          # intermediates 且不在 outputs/apk 生成可签名/可收集的 APK；改为按客户端默认
+          # splits 构建 other 全部 ABI，产物落在 app/build/outputs/apk/other/release/。
           ./gradlew --build-cache --parallel "$TASK" \
-            -Pandroid.injected.build.abi=arm64-v8a \
             -Pandroid.injected.signing.store.file="$KEYSTORE" \
             -Pandroid.injected.signing.store.password="$RELEASE_KEYSTORE_PASSWORD" \
             -Pandroid.injected.signing.key.alias="$RELEASE_KEY_ALIAS" \
@@ -359,13 +361,14 @@ jobs:
           set -euo pipefail
           VERSION="${VERSION#v}"
           mkdir -p dist
-          # 递归收集已签名 release APK（排除 intermediates 与 unsigned），
-          # 兼容 split 产物位于 app/build/outputs/apk/other/release/<abi>/ 子目录的情况。
+          # 优先在标准 outputs/apk 目录递归查找已签名 release APK（split 可能在 <abi>/ 子目录），
+          # 找不到再回退到整个客户端目录（排除 intermediates/unsigned/unaligned）。
           echo "== candidate signed release APKs =="
-          find sfa-client -type f -name '*.apk' ! -name '*-unsigned.apk' ! -path '*/intermediates/*' -printf '%p\n' 2>/dev/null || true
-          pick=$(find sfa-client -type f -name '*arm64-v8a*.apk' ! -name '*-unsigned.apk' ! -path '*/intermediates/*' 2>/dev/null | head -n1 || true)
-          [ -z "$pick" ] && pick=$(find sfa-client -type f -name '*universal*.apk' ! -name '*-unsigned.apk' ! -path '*/intermediates/*' 2>/dev/null | head -n1 || true)
-          [ -z "$pick" ] && pick=$(find sfa-client -type f -name '*.apk' ! -name '*-unsigned.apk' ! -path '*/intermediates/*' 2>/dev/null | head -n1 || true)
+          find sfa-client -type f -path '*/outputs/apk/*' -name '*.apk' ! -name '*-unsigned.apk' -printf '%p\n' 2>/dev/null || true
+          pick=$(find sfa-client -type f -path '*/outputs/apk/*' -name '*arm64-v8a*.apk' ! -name '*-unsigned.apk' 2>/dev/null | head -n1 || true)
+          [ -z "$pick" ] && pick=$(find sfa-client -type f -path '*/outputs/apk/*' -name '*universal*.apk' ! -name '*-unsigned.apk' 2>/dev/null | head -n1 || true)
+          [ -z "$pick" ] && pick=$(find sfa-client -type f -path '*/outputs/apk/*' -name '*.apk' ! -name '*-unsigned.apk' 2>/dev/null | head -n1 || true)
+          [ -z "$pick" ] && pick=$(find sfa-client -type f -name '*.apk' ! -name '*-unsigned.apk' ! -name '*-unaligned.apk' ! -path '*/intermediates/*' 2>/dev/null | head -n1 || true)
           [ -n "$pick" ] || { echo "::error::no signed release APK found under sfa-client"; exit 1; }
           echo "picked: $pick"
           cp "$pick" "dist/SFA-${VERSION}-arm64-${VARIANT}.apk"
