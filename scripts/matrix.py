@@ -43,8 +43,14 @@ def main() -> None:
     else:
         selected = [VARIANTS[variant]]
 
-    sfa, sfl = [], []
+    sfa, sfl, prep = [], [], []
     for c in selected:
+        # prepare: one entry per variant, warms the shared Go module cache.
+        prep.append({
+            "variant": c["variant"],
+            "core_repo": c["core_repo"],
+            "core_ref": c["core_ref"],
+        })
         # SFA: arm64 only, standard (non-legacy) flavor.
         sfa.append({**c, "flavor": "other", "task": ":app:assembleOtherRelease"})
         # SFL: amd64 only, deb package.
@@ -56,8 +62,11 @@ def main() -> None:
         })
 
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+        fh.write("prepare=" + json.dumps(prep) + "\n")
         fh.write("sfa=" + json.dumps(sfa) + "\n")
         fh.write("sfl=" + json.dumps(sfl) + "\n")
+        fh.write("version=" + version + "\n")
+        fh.write("meta=" + json.dumps(selected) + "\n")
         fh.write("tag=sfa-sfl-v" + version + "\n")
 
 

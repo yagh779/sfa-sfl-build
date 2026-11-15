@@ -9,3 +9,6 @@ secrets/
 # Python 运行缓存
 __pycache__/
 *.pyc
+
+# 本地记录，不入库
+TODO.md

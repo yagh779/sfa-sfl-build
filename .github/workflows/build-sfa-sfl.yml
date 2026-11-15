@@ -1,26 +1,29 @@
-name: Build SFA & SFL (sing-box reF1nd / xiaobaf14g)
-
-# Builds the graphical clients for one or both variants:
-#   SFA  = Android GUI  (sing-box-for-android  -> *.apk, arm64 only, standard flavor)
-#   SFL  = Linux   GUI  (sing-box-for-desktop  -> *.deb,  amd64 only)
+# Build SFA (Android) + SFL (Linux .deb) for sing-box reF1nd / xiaobaf14g.
 #
-# The GUI clients are built from source against a specific core commit:
-#   * SFA embeds the core as a gomobile AAR (libbox.aar) built by build_libbox.
-#   * SFL's Electron app locates the core at <client>/../.. (go.mod module
-#     github.com/sagernet/sing-box) and compiles the daemon with build_boxdd.
-# So every job checks the core repo out at the workspace root and nests the
-# client repo under it before building.
+# How the custom core is injected (both variants):
+#   * SFL: the Electron/Rust client sources the Go tree at <client>/../.., so the
+#     core is checked out at the workspace root and the client at clients/desktop;
+#     `cmd/internal/build_boxdd` then builds the daemon from that core.
+#   * SFA: `cmd/internal/build_libbox` produces libbox.aar (gomobile) which is
+#     copied into the Android app's app/libs.
 #
-# Build tags: no `with_naive_outbound` anywhere.
-#   * SFL daemon (build_boxdd) picks release/DEFAULT_BUILD_TAGS_OTHERS when cgo
-#     is off — which happens when CC is empty. We leave CC empty on purpose, so
-#     OTHERS tags (no naive) are used and the whole cronet-go/Chromium toolchain
-#     is unnecessary.
-#   * SFA libbox (build_libbox) hardcodes its tag list and has no CLI switch, so
+# Build tags: a fixed set (env.BUILD_TAGS) with no with_naive_outbound.
+#   * SFL: build_boxdd reads release/DEFAULT_BUILD_TAGS_OTHERS only when cgo is
+#     off (CC empty), so we overwrite those files and keep CC empty -> no cronet.
+#   * SFA: build_libbox hardcodes its tag list (no CLI switch), so
 #     scripts/patch_build_libbox.py rewrites sharedTags to the fixed set and
 #     removes the legacy (API 21) build.
+#
+# Caching: a `prepare` job warms the Go module cache per variant (go list -deps);
+#   build jobs restore it read-only. Go build / Gradle / pnpm / cargo / zig /
+#   electron caches are added alongside the built-in setup-* caches.
+
+name: Build SFA & SFL (sing-box reF1nd / xiaobaf14g)
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       variant:
@@ -42,87 +45,151 @@ on:
           - sfa
           - sfl
       version:
-        description: 'Version string (no leading v), e.g. 1.15.0-alpha.13-xiaobaf14g.11 or 1.15.0-alpha.13'
+        description: 'Version (no leading v), e.g. 1.15.0-alpha.13-xiaobaf14g'
         required: true
         type: string
       prerelease:
-        description: 'Mark the GitHub Release as prerelease'
+        description: 'Mark the Release as prerelease'
         required: false
         type: boolean
         default: true
       publish:
-        description: 'Create / update a GitHub Release with the artifacts'
+        description: 'Create / update the GitHub Release'
         required: false
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: write
 
+# Re-pushing the same tag / re-dispatching cancels the previous in-flight run.
 concurrency:
-  group: build-sfa-sfl-${{ github.ref }}-${{ inputs.variant }}-${{ inputs.version }}
+  group: sfa-sfl-${{ github.event_name == 'push' && github.ref_name || inputs.variant }}-${{ github.event_name == 'push' && github.ref_name || inputs.version }}
   cancel-in-progress: true
 
 env:
   GO_VERSION: '1.27.1'
   NDK_VERSION: r28c
-  # Fixed build tag set for BOTH artifacts and BOTH variants (no with_naive_outbound).
+  # Fixed build tags: no with_naive_outbound (so no cronet toolchain needed).
   BUILD_TAGS: 'with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkname,tfogo_checklinkname0'
 
 jobs:
-  # ── resolve inputs into fully-enumerated matrices ──────────────────
+  # ── 0) Resolve variant x target matrices ────────────────────────────
   resolve:
     name: resolve matrices
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
+      prepare: ${{ steps.m.outputs.prepare }}
       sfa: ${{ steps.m.outputs.sfa }}
       sfl: ${{ steps.m.outputs.sfl }}
+      version: ${{ steps.m.outputs.version }}
+      meta: ${{ steps.m.outputs.meta }}
       tag: ${{ steps.m.outputs.tag }}
     steps:
-      - uses: actions/checkout@v5
-      - name: Build matrix JSON
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 1
+      - name: Resolve
         id: m
         env:
-          VARIANT: ${{ inputs.variant }}
-          VERSION: ${{ inputs.version }}
+          VARIANT: ${{ inputs.variant || 'both' }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: python3 scripts/matrix.py
 
-  # ── 1) SFA: build libbox (arm64) + assemble signed standard APK ─────
-  sfa:
-    name: SFA ${{ matrix.variant }} (arm64)
+  # ── 1) Warm the shared Go module cache per variant (restore-only later) ──
+  prepare:
+    name: prepare modules ${{ matrix.variant }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: resolve
-    if: ${{ inputs.target == 'both' || inputs.target == 'sfa' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.prepare) }}
+    steps:
+      - name: Checkout core (${{ matrix.core_repo }}@${{ matrix.core_ref }})
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ${{ matrix.core_repo }}
+          ref: ${{ matrix.core_ref }}
+          fetch-depth: 1
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Restore Go module cache
+        id: gomod
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/go/pkg/mod
+          key: gomod-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS', 'release/DEFAULT_BUILD_TAGS_OTHERS', 'release/DEFAULT_BUILD_TAGS_WINDOWS') }}
+          lookup-only: true
+      - name: Warm Go modules
+        if: steps.gomod.outputs.cache-hit != 'true'
+        continue-on-error: true
+        env:
+          BUILD_TAGS: ${{ env.BUILD_TAGS }}
+        run: |
+          set -uo pipefail
+          export GOTOOLCHAIN=local
+          echo "warming with tags=$BUILD_TAGS"
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go list -deps -tags "$BUILD_TAGS" ./experimental/boxdd >/dev/null 2>&1 || echo "::warning::warm boxdd deps skipped"
+          GOOS=android GOARCH=arm64 CGO_ENABLED=0 go list -deps -tags "$BUILD_TAGS" ./experimental/libbox >/dev/null 2>&1 || echo "::warning::warm libbox deps skipped"
+      - name: Save Go module cache
+        if: steps.gomod.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/go/pkg/mod
+          key: gomod-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS', 'release/DEFAULT_BUILD_TAGS_OTHERS', 'release/DEFAULT_BUILD_TAGS_WINDOWS') }}
+
+  # ── 2) SFA libbox: build libbox.aar (arm64, no naive) ───────────────
+  sfa-lib:
+    name: SFA libbox ${{ matrix.variant }} (arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [resolve, prepare]
+    if: ${{ !inputs.target || inputs.target == 'both' || inputs.target == 'sfa' }}
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.resolve.outputs.sfa) }}
     steps:
       - name: Checkout core (${{ matrix.core_repo }}@${{ matrix.core_ref }})
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: ${{ matrix.core_repo }}
           ref: ${{ matrix.core_ref }}
           fetch-depth: 0
-      - name: Checkout SFA client
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ matrix.sfa_repo }}
-          ref: ${{ matrix.sfa_ref }}
-          path: sfa-client
-          submodules: recursive
       - name: Checkout builder scripts
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: ${{ github.repository }}
           path: .ci
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
+          cache: false
+      - name: Restore Go module cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/go/pkg/mod
+          key: gomod-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS', 'release/DEFAULT_BUILD_TAGS_OTHERS', 'release/DEFAULT_BUILD_TAGS_WINDOWS') }}
+      - name: Cache Go build (android)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-sfa-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS*') }}-${{ github.sha }}
+          restore-keys: |
+            gobuild-${{ runner.os }}-sfa-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS*') }}-
+            gobuild-${{ runner.os }}-sfa-${{ matrix.variant }}-
       - name: Setup OpenJDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: 17
@@ -144,27 +211,23 @@ jobs:
       - name: Setup NDK (download fallback)
         id: ndk_download
         if: steps.ndk_local.outputs.path == ''
-        uses: nttld/setup-ndk@v1
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
         with:
           ndk-version: ${{ env.NDK_VERSION }}
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          cache-provider: basic
       - name: Apply fixed build tags to build_libbox
         env:
           BUILD_TAGS: ${{ env.BUILD_TAGS }}
         run: |
           set -euo pipefail
           # build_libbox hardcodes its tag list (no CLI switch). Rewrite it to the
-          # fixed tag set (no with_naive_outbound).
+          # fixed tag set (no with_naive_outbound) and drop the legacy build.
           python3 .ci/scripts/patch_build_libbox.py
           echo "--- build_libbox sharedTags (after patch) ---"
           grep -n 'sharedTags = ' cmd/internal/build_libbox/main.go | head -n5
       - name: Build libbox (arm64, no naive)
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk_local.outputs.path || steps.ndk_download.outputs.ndk-path }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
@@ -173,13 +236,80 @@ jobs:
           export PATH="$PATH:$(go env GOPATH)/bin"
           go run ./cmd/internal/build_libbox -target android -platform android/arm64
           ls -lh libbox.aar
+      - name: Upload libbox
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: libbox-${{ matrix.variant }}
+          path: libbox.aar
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  # ── 3) SFA app: assemble APK (arm64, other flavor) ──────────────────
+  sfa:
+    name: SFA ${{ matrix.variant }} (arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [resolve, prepare, sfa-lib]
+    if: ${{ !inputs.target || inputs.target == 'both' || inputs.target == 'sfa' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.sfa) }}
+    steps:
+      - name: Checkout SFA client
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ${{ matrix.sfa_repo }}
+          ref: ${{ matrix.sfa_ref }}
+          path: sfa-client
+          submodules: recursive
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Setup OpenJDK 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Locate NDK from app/build.gradle.kts
+        id: ndk_local
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          WANT=$(sed -n 's/^ *ndkVersion *= *"\(.*\)".*/\1/p' sfa-client/app/build.gradle.kts)
+          NDK=""
+          if [ -n "$WANT" ] && [ -x "$SDK/ndk/$WANT/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+            NDK="$SDK/ndk/$WANT"
+          fi
+          echo "path=$NDK" >> "$GITHUB_OUTPUT"
+      - name: Setup NDK (download fallback)
+        id: ndk_download
+        if: steps.ndk_local.outputs.path == ''
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
+        with:
+          ndk-version: r28
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+        with:
+          cache-provider: basic
+      - name: Download libbox
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: libbox-${{ matrix.variant }}
+          path: libbox-dl
+      - name: Place libbox into app libs
+        run: |
+          set -euo pipefail
           mkdir -p sfa-client/app/libs
-          cp libbox.aar sfa-client/app/libs/libbox.aar
+          cp libbox-dl/libbox.aar sfa-client/app/libs/libbox.aar
           ls -lh sfa-client/app/libs
       - name: Update version.properties
         id: version
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
@@ -220,7 +350,7 @@ jobs:
       - name: Prepare upload
         env:
           VARIANT: ${{ matrix.variant }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
@@ -233,7 +363,7 @@ jobs:
           cp "$pick" "dist/SFA-${VERSION}-arm64-${VARIANT}.apk"
           ls -lh dist
       - name: Upload APK
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: sfa-${{ matrix.variant }}
           path: dist
@@ -241,58 +371,99 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-  # ── 2) SFL: Linux amd64 .deb only, no naive (no cronet toolchain) ──
+  # ── 4) SFL: Linux amd64 .deb only, no naive (no cronet toolchain) ──
   sfl:
     name: SFL ${{ matrix.variant }} (amd64 deb)
     runs-on: ubuntu-26.04
-    needs: resolve
-    if: ${{ inputs.target == 'both' || inputs.target == 'sfl' }}
+    timeout-minutes: 60
+    needs: [resolve, prepare]
+    if: ${{ !inputs.target || inputs.target == 'both' || inputs.target == 'sfl' }}
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.resolve.outputs.sfl) }}
     steps:
       - name: Checkout core (${{ matrix.core_repo }}@${{ matrix.core_ref }})
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: ${{ matrix.core_repo }}
           ref: ${{ matrix.core_ref }}
           fetch-depth: 0
       - name: Checkout SFL client
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: ${{ matrix.sfl_repo }}
           ref: ${{ matrix.sfl_ref }}
           path: clients/desktop
           submodules: recursive
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.88.0
+          cache: false
+      - name: Restore Go module cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
+          path: ~/go/pkg/mod
+          key: gomod-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS', 'release/DEFAULT_BUILD_TAGS_OTHERS', 'release/DEFAULT_BUILD_TAGS_WINDOWS') }}
+      - name: Cache Go build (linux)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-sfl-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS*') }}-${{ github.sha }}
+          restore-keys: |
+            gobuild-${{ runner.os }}-sfl-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS*') }}-
+            gobuild-${{ runner.os }}-sfl-${{ matrix.variant }}-
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
+        with:
+          toolchain: 1.88.0
           targets: ${{ matrix.rust_target }}
+      - name: Cache Rust (cargo + native modules)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/desktop/bin/wayland-menu-toolchain
+          key: cargo-${{ runner.os }}-${{ hashFiles('clients/desktop/native/wayland-menu/Cargo.lock', 'clients/desktop/native/**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.16.0
+      - name: Cache Zig
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/zig
+          key: zig-${{ runner.os }}-${{ hashFiles('clients/desktop/native/**/Cargo.lock') }}
+          restore-keys: |
+            zig-${{ runner.os }}-
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           package_json_file: clients/desktop/package.json
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: clients/desktop/package.json
           cache: pnpm
           cache-dependency-path: |
             clients/desktop/pnpm-lock.yaml
             clients/desktop/dashboard/pnpm-lock.yaml
+      - name: Cache Electron binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: electron-${{ runner.os }}-${{ hashFiles('clients/desktop/pnpm-lock.yaml') }}
+          restore-keys: |
+            electron-${{ runner.os }}-
       - name: Update version.json
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
@@ -303,7 +474,7 @@ jobs:
           cat clients/desktop/version.json
       - name: Pin core tag (build_boxdd reads version via git describe)
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
@@ -382,7 +553,7 @@ jobs:
           cp "${debs[0]}" "dist/${VARIANT}-$(basename "${debs[0]}")"
           ls -lh dist
       - name: Upload .deb
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: sfl-${{ matrix.variant }}
           path: dist
@@ -390,23 +561,101 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-  # ── 3) Publish a single Release with everything ────────────────────
+  # ── 5) Publish a single Release with everything ────────────────────
   publish:
     name: publish release
-    if: ${{ inputs.publish }}
+    # Publish when asked AND at least one requested artifact built.
+    # A single-target run skips the other build job, so don't require both.
+    if: ${{ !cancelled() && inputs.publish && (needs.sfa.result == 'success' || needs.sfl.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [resolve, sfa, sfl]
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           path: builds
+          pattern: '!libbox-*'
           merge-multiple: true
+      - name: Compose release notes
+        id: notes
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          TARGET: ${{ inputs.target }}
+          BUILD_TAGS: ${{ env.BUILD_TAGS }}
+          META: ${{ needs.resolve.outputs.meta }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import os, json, glob, sys
+          sys.stdout.reconfigure(encoding="utf-8")
+          def human(n):
+              for u in ["B", "KB", "MB", "GB", "TB"]:
+                  if n < 1024:
+                      return ("%.0f %s" % (n, u)) if u == "B" else ("%.1f %s" % (n, u))
+                  n /= 1024.0
+              return "%.1f PB" % n
+          version = os.environ["VERSION"]
+          tag = os.environ["TAG"]
+          build_tags = os.environ["BUILD_TAGS"]
+          target = os.environ.get("TARGET", "") or "both"
+          meta = json.loads(os.environ.get("META") or "[]")
+          pre = os.environ.get("PRERELEASE", "").lower() in ("true", "1")
+          repo = os.environ["REPO"]
+          server = os.environ["SERVER_URL"]
+          run_id = os.environ["RUN_ID"]
+          variants = [m["variant"] for m in meta]
+          variants_txt = " / ".join(variants) if variants else "—"
+          files = sorted(glob.glob("builds/*"))
+          L = []
+          L.append("# SFA / SFL — %s" % version)
+          L.append("")
+          L.append("- **名称 (name):** sing-box SFA/SFL")
+          L.append("- **版本 (version):** `%s`" % version)
+          L.append("- **构建标签 (build tags):** `%s`" % build_tags)
+          L.append("- **变体 (variants):** %s" % variants_txt)
+          L.append("- **构建目标 (target):** `%s`" % target)
+          L.append("- **发布类型 (release):** %s" % ("Pre-release" if pre else "Stable"))
+          L.append("- **构建运行 (run):** [%s](%s/%s/actions/runs/%s)" % (tag, server, repo, run_id))
+          L.append("")
+          L.append("## 产物 (Artifacts)")
+          L.append("")
+          L.append("| 文件 | 大小 |")
+          L.append("| --- | --- |")
+          for f in files:
+              L.append("| `%s` | %s |" % (os.path.basename(f), human(os.path.getsize(f))))
+          L.append("")
+          L.append("## 来源 (Source refs)")
+          for m in meta:
+              L.append("")
+              L.append("### %s" % m["variant"])
+              L.append("- core: `%s@%s`" % (m["core_repo"], m["core_ref"]))
+              L.append("- SFA: `%s@%s`" % (m["sfa_repo"], m["sfa_ref"]))
+              L.append("- SFL: `%s@%s`" % (m["sfl_repo"], m["sfl_ref"]))
+          L.append("")
+          L.append("## 安装 / 校验 (Install / verify)")
+          L.append("")
+          L.append("- **SFA**：`adb install <SFA-*.apk>`（仅 arm64-v8a，Android 7.0+/API 24+）。")
+          L.append("- **SFL**：`sudo apt install ./<variant>-SFL-*.deb`；`.deb` 已用 GPG 签名（debsigs / origin）。")
+          L.append("")
+          body = "\n".join(L) + "\n"
+          open("RELEASE_NOTES.md", "w", encoding="utf-8").write(body)
+          vjoin = " + ".join(variants)
+          name = "SFA/SFL " + version + ((" [%s]" % vjoin) if variants else "")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("name=" + name + "\n")
+          print(body)
+          PY
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
-          name: sing-box SFA/SFL ${{ inputs.version }}
+          name: ${{ steps.notes.outputs.name }}
+          body_path: RELEASE_NOTES.md
           prerelease: ${{ inputs.prerelease }}
           draft: false
           files: builds/*

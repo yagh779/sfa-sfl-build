@@ -51,8 +51,10 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkna
 .
 ├── .github/workflows/build-sfa-sfl.yml   # 唯一工作流
 ├── scripts/
-│   ├── matrix.py                          # 由输入生成构建矩阵
+│   ├── matrix.py                          # 由输入生成 prepare / sfa / sfl 矩阵与 version / meta / tag
 │   └── patch_build_libbox.py              # 重写 build_libbox 的标签并移除 legacy 构建
+├── TODO.md                                # 优化项与完成状态
+├── .gitignore
 └── README.md
 ```
 
@@ -95,10 +97,20 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkna
 
 ## 工作流结构
 
-- `resolve`：`scripts/matrix.py` 生成 `sfa` / `sfl` 矩阵（每变体各 1 条）。
-- `sfa`：检出 core + 客户端 + 脚本 → `patch_build_libbox.py`（改标签、去 legacy）→ `make lib_install` + `build_libbox`（android/arm64）→ 复制 `libbox.aar` → 更新 `version.properties` → 注入签名 → `./gradlew assembleOtherRelease -Pandroid.injected.build.abi=arm64-v8a`。
-- `sfl`：检出 core + 客户端 → 覆盖 `release/DEFAULT_BUILD_TAGS*` → Rust/Zig（wayland 原生模块）→ `pnpm package:linux -- deb x64`（`CC` 空、无 cronet）→ `debsigs` 签名。
-- `publish`：汇总 apk / deb 并创建 / 更新 Release。
+- `resolve`：`scripts/matrix.py` 生成 `prepare` / `sfa` / `sfl` 矩阵，以及 `version` / `meta` / `tag` 输出。
+- `prepare`：按变体用 `go list -deps` 预热 `~/go/pkg/mod` 模块缓存（`lookup-only` 保存，供后续 job 与后续运行复用；预热步骤失败仅告警）。
+- `sfa-lib`：检出 core + 构建脚本 → `patch_build_libbox.py`（改标签、去 legacy）→ `make lib_install` + `build_libbox`（android/arm64）→ 上传 `libbox.aar`。
+- `sfa`：检出客户端 → 下载 `libbox.aar` 放入 `app/libs` → 更新 `version.properties` → 注入签名 → `./gradlew assembleOtherRelease -Pandroid.injected.build.abi=arm64-v8a` → 上传 APK。
+- `sfl`：检出 core + 客户端 → 覆盖 `release/DEFAULT_BUILD_TAGS*` → Rust/Zig（wayland 原生模块）→ `pnpm package:linux -- deb x64`（`CC` 空、无 cronet）→ `debsigs` 签名 → 上传 `.deb`。
+- `publish`：汇总 apk / deb，生成发布页（名称、版本、构建标签、变体、来源 refs、产物表）并创建 / 更新 Release。单产物（`target=sfa`/`sfl`）运行也会发布。
+
+## 缓存与加速
+
+- **Go**：`prepare` 预热 `~/go/pkg/mod`，各构建 job `actions/cache/restore` 复用；`~/.cache/go-build` 按 `go.sum` + variant + SHA 缓存并 `restore-keys` 回退。
+- **Gradle**：`gradle/actions/setup-gradle`（`cache-provider: basic`）。
+- **pnpm / Node**：`actions/setup-node` 的 pnpm store 缓存 + `~/.cache/electron`、`~/.cache/electron-builder`。
+- **Rust / Zig**：`~/.cargo/registry`、`~/.cargo/git`、`clients/desktop/bin/wayland-menu-toolchain`、`~/.cache/zig`。
+- 所有 Actions 均钉到 commit SHA；各 job 设 `timeout-minutes`；`concurrency` 取消同参数的并发旧运行。
 
 ## 已知限制
 
