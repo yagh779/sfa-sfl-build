@@ -358,12 +358,16 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
-          SRC=sfa-client/app/build/outputs/apk/other/release
           mkdir -p dist
-          pick=$(ls "$SRC"/*arm64-v8a*.apk 2>/dev/null | head -n1 || true)
-          [ -z "$pick" ] && pick=$(ls "$SRC"/*universal*.apk 2>/dev/null | head -n1 || true)
-          [ -z "$pick" ] && pick=$(ls "$SRC"/*.apk 2>/dev/null | head -n1 || true)
-          [ -n "$pick" ] || { echo "::error::no APK found under $SRC"; exit 1; }
+          # 递归收集已签名 release APK（排除 intermediates 与 unsigned），
+          # 兼容 split 产物位于 app/build/outputs/apk/other/release/<abi>/ 子目录的情况。
+          echo "== candidate signed release APKs =="
+          find sfa-client -type f -name '*.apk' ! -name '*-unsigned.apk' ! -path '*/intermediates/*' -printf '%p\n' 2>/dev/null || true
+          pick=$(find sfa-client -type f -name '*arm64-v8a*.apk' ! -name '*-unsigned.apk' ! -path '*/intermediates/*' 2>/dev/null | head -n1 || true)
+          [ -z "$pick" ] && pick=$(find sfa-client -type f -name '*universal*.apk' ! -name '*-unsigned.apk' ! -path '*/intermediates/*' 2>/dev/null | head -n1 || true)
+          [ -z "$pick" ] && pick=$(find sfa-client -type f -name '*.apk' ! -name '*-unsigned.apk' ! -path '*/intermediates/*' 2>/dev/null | head -n1 || true)
+          [ -n "$pick" ] || { echo "::error::no signed release APK found under sfa-client"; exit 1; }
+          echo "picked: $pick"
           cp "$pick" "dist/SFA-${VERSION}-arm64-${VARIANT}.apk"
           ls -lh dist
       - name: Upload APK
