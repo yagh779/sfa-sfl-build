@@ -188,7 +188,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/go-build
-          key: gobuild-${{ runner.os }}-sfa-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS*') }}-${{ github.sha }}
+          key: gobuild-${{ runner.os }}-sfa-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS*') }}
           restore-keys: |
             gobuild-${{ runner.os }}-sfa-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS*') }}-
             gobuild-${{ runner.os }}-sfa-${{ matrix.variant }}-
@@ -432,7 +432,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/go-build
-          key: gobuild-${{ runner.os }}-sfl-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS*') }}-${{ github.sha }}
+          key: gobuild-${{ runner.os }}-sfl-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS*') }}
           restore-keys: |
             gobuild-${{ runner.os }}-sfl-${{ matrix.variant }}-${{ hashFiles('go.sum', 'release/DEFAULT_BUILD_TAGS*') }}-
             gobuild-${{ runner.os }}-sfl-${{ matrix.variant }}-
@@ -455,13 +455,6 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.16.0
-      - name: Cache Zig
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/.cache/zig
-          key: zig-${{ runner.os }}-${{ hashFiles('clients/desktop/native/**/Cargo.lock') }}
-          restore-keys: |
-            zig-${{ runner.os }}-
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
