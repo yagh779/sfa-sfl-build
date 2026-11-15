@@ -53,7 +53,6 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkna
 ├── scripts/
 │   ├── matrix.py                          # 由输入生成 prepare / sfa / sfl 矩阵与 version / meta / tag
 │   └── patch_build_libbox.py              # 重写 build_libbox 的标签并移除 legacy 构建
-├── TODO.md                                # 优化项与完成状态
 ├── .gitignore
 └── README.md
 ```

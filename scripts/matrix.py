@@ -2,7 +2,7 @@
 """Emit the GitHub Actions matrices for build-sfa-sfl.yml.
 
 Reads VARIANT and VERSION from the environment (set from workflow_dispatch
-inputs) and appends `sfa`, `sfl` and `tag` to $GITHUB_OUTPUT.
+inputs) and appends `prepare`, `sfa`, `sfl`, `version`, `meta` and `tag` to $GITHUB_OUTPUT.
 
 Scope (per user decision):
   * SFA  -> Android arm64 only, `other` flavor only (no legacy).
