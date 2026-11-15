@@ -76,9 +76,12 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkna
 | --- | --- |
 | `variant` | `both` / `xiaobaf14g` / `reF1nd` |
 | `target` | `both` / `sfa` / `sfl`（仅构建其中一类产物；默认 `both`） |
-| `version` | 版本号（不含 `v` 前缀），如 `1.15.0-alpha.13-xiaobaf14g.11` |
+| `version_xiaobaf14g` | xiaobaf14g 版本号（不含 `v`），如 `1.15.0-alpha.13-xiaobaf14g.11`；选 `xiaobaf14g`/`both` 时必填 |
+| `version_ref1nd` | reF1nd 版本号（不含 `v`）；选 `reF1nd`/`both` 时必填 |
 | `prerelease` | 是否标记 Release 为 prerelease |
 | `publish` | 是否创建 / 更新 GitHub Release |
+
+> 两个变体的版本可以不同：分别用 `version_xiaobaf14g` / `version_ref1nd` 指定；`variant=both` 时两者都必须填写（缺一会直接报错）。
 
 ### Secrets
 

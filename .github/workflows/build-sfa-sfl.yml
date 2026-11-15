@@ -44,9 +44,13 @@ on:
           - both
           - sfa
           - sfl
-      version:
-        description: 'Version (no leading v), e.g. 1.15.0-alpha.13-xiaobaf14g'
-        required: true
+      version_xiaobaf14g:
+        description: 'xiaobaf14g 版本号（不含 v），如 1.15.0-alpha.13-xiaobaf14g.11'
+        required: false
+        type: string
+      version_ref1nd:
+        description: 'reF1nd 版本号（不含 v）；variant=both 且两者都构建时必填'
+        required: false
         type: string
       prerelease:
         description: 'Mark the Release as prerelease'
@@ -64,7 +68,7 @@ permissions:
 
 # Re-pushing the same tag / re-dispatching cancels the previous in-flight run.
 concurrency:
-  group: sfa-sfl-${{ github.event_name == 'push' && github.ref_name || inputs.variant }}-${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+  group: sfa-sfl-${{ github.event_name == 'push' && github.ref_name || inputs.variant }}-${{ github.event_name == 'push' && github.ref_name || inputs.version_xiaobaf14g || inputs.version_ref1nd }}
   cancel-in-progress: true
 
 env:
@@ -83,7 +87,6 @@ jobs:
       prepare: ${{ steps.m.outputs.prepare }}
       sfa: ${{ steps.m.outputs.sfa }}
       sfl: ${{ steps.m.outputs.sfl }}
-      version: ${{ steps.m.outputs.version }}
       meta: ${{ steps.m.outputs.meta }}
       tag: ${{ steps.m.outputs.tag }}
     steps:
@@ -95,7 +98,8 @@ jobs:
         id: m
         env:
           VARIANT: ${{ inputs.variant || 'both' }}
-          VERSION: ${{ inputs.version || github.ref_name }}
+          VERSION_XIAOBAF14G: ${{ github.event_name == 'push' && github.ref_name || inputs.version_xiaobaf14g }}
+          VERSION_REF1ND: ${{ github.event_name == 'push' && github.ref_name || inputs.version_ref1nd }}
         run: python3 scripts/matrix.py
 
   # ── 1) Warm the shared Go module cache per variant (restore-only later) ──
@@ -227,7 +231,7 @@ jobs:
       - name: Build libbox (arm64, no naive)
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk_local.outputs.path || steps.ndk_download.outputs.ndk-path }}
-          VERSION: ${{ inputs.version || github.ref_name }}
+          VERSION: ${{ matrix.version }}
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
@@ -309,7 +313,7 @@ jobs:
       - name: Update version.properties
         id: version
         env:
-          VERSION: ${{ inputs.version || github.ref_name }}
+          VERSION: ${{ matrix.version }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
@@ -350,7 +354,7 @@ jobs:
       - name: Prepare upload
         env:
           VARIANT: ${{ matrix.variant }}
-          VERSION: ${{ inputs.version || github.ref_name }}
+          VERSION: ${{ matrix.version }}
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
@@ -463,7 +467,7 @@ jobs:
             electron-${{ runner.os }}-
       - name: Update version.json
         env:
-          VERSION: ${{ inputs.version || github.ref_name }}
+          VERSION: ${{ matrix.version }}
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
@@ -474,7 +478,7 @@ jobs:
           cat clients/desktop/version.json
       - name: Pin core tag (build_boxdd reads version via git describe)
         env:
-          VERSION: ${{ inputs.version || github.ref_name }}
+          VERSION: ${{ matrix.version }}
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
@@ -580,7 +584,6 @@ jobs:
       - name: Compose release notes
         id: notes
         env:
-          VERSION: ${{ needs.resolve.outputs.version }}
           TAG: ${{ needs.resolve.outputs.tag }}
           TARGET: ${{ inputs.target }}
           BUILD_TAGS: ${{ env.BUILD_TAGS }}
@@ -599,7 +602,8 @@ jobs:
                       return ("%.0f %s" % (n, u)) if u == "B" else ("%.1f %s" % (n, u))
                   n /= 1024.0
               return "%.1f PB" % n
-          version = os.environ["VERSION"]
+          _meta_versions = json.loads(os.environ.get("META") or "[]")
+          vers_txt = " / ".join("%s %s" % (m["variant"], m["version"]) for m in _meta_versions)
           tag = os.environ["TAG"]
           build_tags = os.environ["BUILD_TAGS"]
           target = os.environ.get("TARGET", "") or "both"
@@ -612,10 +616,10 @@ jobs:
           variants_txt = " / ".join(variants) if variants else "—"
           files = sorted(glob.glob("builds/*"))
           L = []
-          L.append("# SFA / SFL — %s" % version)
+          L.append("# SFA / SFL — %s" % vers_txt)
           L.append("")
           L.append("- **名称 (name):** sing-box SFA/SFL")
-          L.append("- **版本 (version):** `%s`" % version)
+          L.append("- **变体版本 (variant versions):** %s" % vers_txt)
           L.append("- **构建标签 (build tags):** `%s`" % build_tags)
           L.append("- **变体 (variants):** %s" % variants_txt)
           L.append("- **构建目标 (target):** `%s`" % target)
@@ -645,7 +649,7 @@ jobs:
           body = "\n".join(L) + "\n"
           open("RELEASE_NOTES.md", "w", encoding="utf-8").write(body)
           vjoin = " + ".join(variants)
-          name = "SFA/SFL " + version + ((" [%s]" % vjoin) if variants else "")
+          name = "SFA/SFL " + vers_txt + ((" [%s]" % vjoin) if variants else "")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write("name=" + name + "\n")
           print(body)
