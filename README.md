@@ -19,7 +19,7 @@
 - **SFA**：`SFA-<version>-arm64-<variant>.apk` — Android，arm64，标准版（`other` flavor）
 - **SFL**：`<variant>-SFL-<version>-x64.deb` — Linux，amd64，GPG 签名
 
-`variant=both` 时一次产出上述两类 × 两个变体（共 4 个文件）；如需单变体产物，使用 `variant=xiaobaf14g` 或 `variant=reF1nd`。
+`variant=both` 时一次产出上述两类 × 两个变体（共 4 个文件）；如需单变体产物，使用 `variant=xiaobaf14g` 或 `variant=reF1nd`；`target=sfa` / `target=sfl` 可只构建其中一类产物。
 
 ## 固定构建标签
 
@@ -74,6 +74,7 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkna
 | 参数 | 说明 |
 | --- | --- |
 | `variant` | `both` / `xiaobaf14g` / `reF1nd` |
+| `target` | `both` / `sfa` / `sfl`（仅构建其中一类产物；默认 `both`） |
 | `version` | 版本号（不含 `v` 前缀），如 `1.15.0-alpha.13-xiaobaf14g.11` |
 | `prerelease` | 是否标记 Release 为 prerelease |
 | `publish` | 是否创建 / 更新 GitHub Release |

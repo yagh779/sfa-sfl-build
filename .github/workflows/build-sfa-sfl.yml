@@ -32,6 +32,15 @@ on:
           - both
           - xiaobaf14g
           - reF1nd
+      target:
+        description: 'Build which artifact'
+        required: true
+        type: choice
+        default: both
+        options:
+          - both
+          - sfa
+          - sfl
       version:
         description: 'Version string (no leading v), e.g. 1.15.0-alpha.13-xiaobaf14g.11 or 1.15.0-alpha.13'
         required: true
@@ -83,6 +92,7 @@ jobs:
     name: SFA ${{ matrix.variant }} (arm64)
     runs-on: ubuntu-latest
     needs: resolve
+    if: ${{ inputs.target == 'both' || inputs.target == 'sfa' }}
     strategy:
       fail-fast: false
       matrix:
@@ -236,6 +246,7 @@ jobs:
     name: SFL ${{ matrix.variant }} (amd64 deb)
     runs-on: ubuntu-26.04
     needs: resolve
+    if: ${{ inputs.target == 'both' || inputs.target == 'sfl' }}
     strategy:
       fail-fast: false
       matrix:
