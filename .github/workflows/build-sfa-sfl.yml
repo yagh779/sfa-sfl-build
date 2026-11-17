@@ -74,6 +74,8 @@ concurrency:
 env:
   GO_VERSION: '1.27.1'
   NDK_VERSION: r28c
+  # Shared base so both variants get the SAME, non-decreasing versionCode.
+  SFA_VERSION_CODE_BASE: '3009'
   # Fixed build tags: no with_naive_outbound (so no cronet toolchain needed).
   BUILD_TAGS: 'with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkname,tfogo_checklinkname0'
 
@@ -279,6 +281,12 @@ jobs:
           python3 .ci/scripts/restrict_abi.py sfa-client/app/build.gradle.kts
           echo "--- splits.abi (after patch) ---"
           grep -n -A6 'splits {' sfa-client/app/build.gradle.kts | head -n 10
+      - name: Pin package name (io.reF1nd.sfa)
+        run: |
+          set -euo pipefail
+          python3 .ci/scripts/pin_android_application_id.py sfa-client/app/build.gradle.kts
+          echo "--- applicationId (after pin) ---"
+          grep -n 'applicationId' sfa-client/app/build.gradle.kts | head -n 3
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
@@ -326,12 +334,14 @@ jobs:
         env:
           VERSION: ${{ matrix.version }}
           RUN_NUMBER: ${{ github.run_number }}
+          CODE_BASE: ${{ env.SFA_VERSION_CODE_BASE }}
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
           FILE=sfa-client/version.properties
-          BASE_CODE=$(sed -n 's/^VERSION_CODE=//p' "$FILE")
-          VERSION_CODE=$((BASE_CODE + RUN_NUMBER))
+          # Unified base (not the per-repo VERSION_CODE) so reF1nd and MiChongs
+          # get the SAME versionCode and can be installed over each other.
+          VERSION_CODE=$((CODE_BASE + RUN_NUMBER))
           sed -i \
             -e "s/^VERSION_CODE=.*/VERSION_CODE=${VERSION_CODE}/" \
             -e "s/^VERSION_NAME=.*/VERSION_NAME=${VERSION}/" \
@@ -418,6 +428,18 @@ jobs:
           ref: ${{ matrix.sfl_ref }}
           path: clients/desktop
           submodules: recursive
+      - name: Checkout builder scripts
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ${{ github.repository }}
+          path: .ci
+      - name: Pin package name (deb)
+        run: |
+          set -euo pipefail
+          python3 .ci/scripts/pin_desktop_package_name.py clients/desktop
+          echo "--- deb package identity (after pin) ---"
+          python3 -c "import json;print('package name:', json.load(open('clients/desktop/package.json'))['name'])"
+          grep -nE '^(appId|productName):|^  appId:|^  executableName:' clients/desktop/electron-builder.yml
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:

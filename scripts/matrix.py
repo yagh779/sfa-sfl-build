@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """Emit the GitHub Actions matrices for build-sfa-sfl.yml.
 
-Reads VARIANT, VERSION_XIAOBAF14G, VERSION_REF1ND from the environment and
-appends `prepare`, `sfa`, `sfl`, `meta` and `tag` to $GITHUB_OUTPUT.
-
-Each variant carries ITS OWN version (reF1nd and xiaobaf14g/MiChongs may be at
-different versions), so the single-version limitation is removed. A version is
-required only for the variants actually selected.
-
 Scope (per user decision):
   * SFA  -> Android arm64 only, `other` flavor only (no legacy).
   * SFL  -> Linux amd64 only, `.deb` only.
+
+The version is supplied per variant (version_xiaobaf14g / version_ref1nd) so the
+two variants can carry independent version numbers; it only affects naming and
+metadata, never which commit is built.
 """
 import json
 import os
@@ -53,7 +50,7 @@ def main() -> None:
 
     missing = [c["variant"] for c in selected if not version_of[c["variant"]]]
     if missing:
-        sys.exit("ERROR: missing version for variant(s): " + ", ".join(missing))
+        sys.exit(f"ERROR: missing version for variant(s): {', '.join(missing)}")
 
     sfa, sfl, prep, meta = [], [], [], []
     for c in selected:
@@ -76,8 +73,15 @@ def main() -> None:
             "rust_target": "x86_64-unknown-linux-gnu",
         })
 
-    # Release tag encodes every variant's own version: sfa-sfl-<variant>-<ver>...
-    tag = "sfa-sfl-" + "-".join("%s-%s" % (m["variant"], m["version"]) for m in meta)
+    # Release tag base: everything before the last "-" of the version,
+    # regardless of variant (e.g. "1.15.0-alpha-reF1nd.11" -> "1.15.0-alpha").
+    # For variant=both the per-variant bases must agree so both share one Release.
+    bases = {m["version"].rsplit("-", 1)[0] for m in meta}
+    if len(bases) != 1:
+        sys.exit(f"ERROR: versions map to different release tags: {', '.join(sorted(bases))}")
+    base = bases.pop()
+    # Tag: variant=both uses the bare base; a single variant appends its name.
+    tag = base if len(meta) > 1 else f"{base}-{meta[0]['variant']}"
 
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
         fh.write("prepare=" + json.dumps(prep) + "\n")
