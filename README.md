@@ -1,163 +1,166 @@
-# sing-box SFA / SFL 构建
+# sing-box SFA / SFL builds
 
-本仓库通过 GitHub Actions，从上游公开源码构建 [sing-box](https://github.com/SagerNet/sing-box) 两个衍生分支体系的 GUI 客户端，全程在 CI 中完成，无需本地编译环境：
+English | [Simplified Chinese](README.zh.md)
 
-- **SFA** — Android GUI（APK）
-- **SFL** — Linux GUI（`.deb`）
+This repository builds GUI clients for two derivative branch families of [sing-box](https://github.com/SagerNet/sing-box) from upstream public source, entirely in GitHub Actions — no local build environment is required:
 
-> **非官方项目。** 本仓库仅从各上游 fork 的公开源码构建安装包，与 SagerNet、reF1nd、MiChongs 及其维护者均无从属关系，亦不代表其立场。所有源码与产物均遵循各自上游许可证，请遵守对应许可条款并自行评估使用风险。
+- **SFA** — Android GUI (APK)
+- **SFL** — Linux GUI (`.deb`)
 
-## 支持的变体与源码坐标
+> **Unofficial project.** This repository only builds installers from the public source of the upstream forks. It is not affiliated with, and does not represent, SagerNet, reF1nd, MiChongs or their maintainers. All source code and artifacts follow their respective upstream licenses; comply with the applicable terms and assess the risk of use yourself.
 
-| 变体 | core | SFA 源（Android） | SFL 源（Linux） |
+## Supported variants and source coordinates
+
+| Variant | core | SFA source (Android) | SFL source (Linux) |
 | --- | --- | --- | --- |
 | xiaobaf14g | `MiChongs/sing-box@xiaobaf14g-testing` | `MiChongs/sing-box-for-android@xiaobaf14g-testing` | `MiChongs/sing-box-for-desktop@xiaobaf14g-dev` |
 | reF1nd | `reF1nd/sing-box@reF1nd-testing-next` | `reF1nd/sing-box-for-android@reF1nd-testing` | `reF1nd/sing-box-for-desktop@reF1nd-dev` |
 
-两个变体分别源自不同维护者的分支，版本号各自独立（由 `version_xiaobaf14g` / `version_ref1nd` 分别指定）；同一变体下，SFA / SFL 与对应 core 使用同一版本号，保证版本对齐。
+The two variants come from branches maintained by different people and carry independent version numbers (set via `version_xiaobaf14g` / `version_ref1nd` respectively). Within one variant, SFA / SFL use the same version as the corresponding core, keeping versions aligned.
 
-## 构建产物
+## Build artifacts
 
-每次运行按所选变体产出以下文件：
+Each run produces the following files for the selected variant(s):
 
-- **SFA**：`SFA-<version>-arm64-<variant>.apk` — Android，arm64，标准版（`other` flavor）
-- **SFL**：`<variant>-SFL-<version>-x64.deb` — Linux，amd64，GPG 签名
+- **SFA**: `SFA-<version>-arm64-<variant>.apk` — Android, arm64, standard (`other` flavor)
+- **SFL**: `SFL-<version>-x64-<variant>.deb` — Linux, amd64, GPG-signed
 
-`variant=both` 时一次产出上述两类 × 两个变体（共 4 个文件）；`variant=xiaobaf14g` / `variant=reF1nd` 只构建单个变体；`target=sfa` / `target=sfl` 可只构建其中一类产物。
+With `variant=both` a single run produces both artifact types for both variants (4 files); `variant=xiaobaf14g` / `variant=reF1nd` build only a single variant; `target=sfa` / `target=sfl` build only one artifact type.
 
-## 固定构建标签
+## Fixed build tags
 
-两个变体、两类产物统一使用以下标签集（定义于 workflow 的 `env.BUILD_TAGS`，不含 `with_naive_outbound`）：
+Both variants and both artifact types use the following tag set (defined as the workflow's `env.BUILD_TAGS`, without `with_naive_outbound`):
 
 ```
-with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,badlinkname,tfogo_checklinkname0
+with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,with_conntrack,badlinkname,tfogo_checklinkname0
 ```
 
-应用方式：
+How it is applied:
 
-- **SFL（`build_boxdd`）**：cgo 关闭（`CC` 为空）时读取 `release/DEFAULT_BUILD_TAGS_OTHERS`。工作流将该文件（及 `release/DEFAULT_BUILD_TAGS`）覆盖为上述标签集，并保持 `CC` 为空、`CGO_ENABLED=0`，因此不引入 naive，也无需 cronet-go / Chromium 工具链。
-- **SFA（`build_libbox`）**：`build_libbox` 的标签写死在 `cmd/internal/build_libbox/main.go` 的 `sharedTags` 且无命令行开关。工作流用 [scripts/patch_build_libbox.py](scripts/patch_build_libbox.py) 将其重写为上述标签集，再编 arm64 的 `libbox.aar`。
+- **SFL (`build_boxdd`)**: with cgo disabled (empty `CC`) it reads `release/DEFAULT_BUILD_TAGS_OTHERS`. The workflow overwrites that file (and `release/DEFAULT_BUILD_TAGS`) with the tag set above and keeps `CC` empty and `CGO_ENABLED=0`, so naive is not pulled in and no cronet-go / Chromium toolchain is needed.
+- **SFA (`build_libbox`)**: `build_libbox` hardcodes its tags in `sharedTags` in `cmd/internal/build_libbox/main.go` with no CLI switch. The workflow uses [scripts/patch_build_libbox.py](scripts/patch_build_libbox.py) to rewrite it to the tag set above, then builds the arm64 `libbox.aar`.
 
-## 关于 CGO
+## About CGO
 
-- **Go 工具链默认**：本机原生编译时 `CGO_ENABLED=1`；交叉编译时默认为 `0`。
-- **本工作流显式控制**：
-  - SFL（linux/amd64）：关闭（`CC` 为空、`CGO_ENABLED=0`），使用 `DEFAULT_BUILD_TAGS_OTHERS`，无需 cronet。
-  - SFA（android/arm64）：开启（`gomobile bind` 与 NDK 依赖 cgo）。
+- **Go toolchain default**: `CGO_ENABLED=1` for native builds, `0` for cross builds.
+- **This workflow controls it explicitly**:
+  - SFL (linux/amd64): disabled (empty `CC`, `CGO_ENABLED=0`), using `DEFAULT_BUILD_TAGS_OTHERS`; no cronet needed.
+  - SFA (android/arm64): enabled (`gomobile bind` and the NDK require cgo).
 
-## 关于 legacy
+## About legacy
 
-`build_libbox` 原会同时生成 legacy（API 21）库 `libbox-legacy.aar`。构建前由 [scripts/patch_build_libbox.py](scripts/patch_build_libbox.py) 移除该 legacy 分支构建，因此仅生成 arm64 的 `libbox.aar`，不生成 `libbox-legacy.aar`，也不产出 legacy APK。
+`build_libbox` originally also produced a legacy (API 21) library `libbox-legacy.aar`. Before building, [scripts/patch_build_libbox.py](scripts/patch_build_libbox.py) removes that legacy branch, so only the arm64 `libbox.aar` is produced, no `libbox-legacy.aar` and no legacy APK.
 
-## 工作原理（core 注入）
+## How it works (core injection)
 
-- **SFA**：core 编成 gomobile 库 `libbox.aar`，放入客户端 `app/libs/`，`other` flavor 通过 `implementation(files("libs/libbox.aar"))` 引用。
-  生成命令（在 core 仓库内）：`go run ./cmd/internal/build_libbox -target android -platform android/arm64`。
-- **SFL**：`scripts/sing-box.ts` 的 `findBoxDirectory()` 在 `<client>/../..` 查找 `go.mod` 为 `module github.com/sagernet/sing-box` 的目录；`scripts/package.ts` 调 core 的 `go run ./cmd/internal/build_boxdd -target=linux/amd64` 编守护进程，再由 electron-builder 打成 `.deb`。
-  因此工作流将 core 检出到工作区根，桌面客户端检出到 `clients/desktop`（`<client>/../..` 即 core 根）。
+- **SFA**: the core is built into a gomobile library `libbox.aar`, placed in the client's `app/libs/`, and the `other` flavor references it via `implementation(files("libs/libbox.aar"))`.
+  Build command (inside the core repo): `go run ./cmd/internal/build_libbox -target android -platform android/arm64`.
+- **SFL**: `scripts/sing-box.ts`'s `findBoxDirectory()` looks in `<client>/../..` for a directory whose `go.mod` has `module github.com/sagernet/sing-box`; `scripts/package.ts` calls the core's `go run ./cmd/internal/build_boxdd -target=linux/amd64` to build the daemon, then electron-builder packages the `.deb`.
+  So the workflow checks out the core at the workspace root and the desktop client at `clients/desktop` (`<client>/../..` is the core root).
 
-## 仓库结构
+## Repository layout
 
 ```
 .
-├── .github/workflows/build-sfa-sfl.yml   # 唯一工作流
+├── .github/workflows/build-sfa-sfl.yml   # the single workflow
 ├── scripts/
-│   ├── matrix.py                          # 由输入生成 prepare / sfa / sfl 矩阵与 meta / tag
-│   ├── patch_build_libbox.py              # 重写 build_libbox 的标签并移除 legacy 构建
-│   ├── restrict_abi.py                    # 改写客户端 splits.abi，仅构建 arm64-v8a
-│   ├── pin_android_application_id.py      # 固定 SFA 的 applicationId（跨变体同包名）
-│   └── pin_desktop_package_name.py        # 固定 SFL 的 deb 包名 / appId / 可执行名
+│   ├── matrix.py                          # builds prepare / sfa / sfl matrices and meta / tag from inputs
+│   ├── patch_build_libbox.py              # rewrites build_libbox tags and removes the legacy build
+│   ├── restrict_abi.py                    # rewrites the client splits.abi to build arm64-v8a only
+│   ├── pin_android_application_id.py      # pins SFA applicationId (same package name across variants)
+│   └── pin_desktop_package_name.py        # pins SFL deb package name / appId / executable name
 ├── .gitignore
-└── README.md
+├── README.md                              # English (default)
+└── README.zh.md                           # Simplified Chinese
 ```
 
-## 包名固定（跨变体互相覆盖安装）
+## Package-name pinning (cross-variant overwrite install)
 
-两个变体（reF1nd / MiChongs）构建的是**同一个应用**：SFA 的 `applicationId`、SFL 的 deb `Package` 在两者间保持固定一致，因此任一变体的产物都可覆盖安装到已装另一变体的设备/系统上（共用应用数据/配置目录）。
+The two variants (reF1nd / MiChongs) build the **same application**: the SFA `applicationId` and the SFL deb `Package` stay identical between them, so either variant's artifact can be installed over a device/system that already has the other variant (sharing the same app data / config directory).
 
-为保证上游代码更新不会改名、破坏这种互通，构建时用脚本把包身份**强制固定**（幂等，跟随上游代码但包名固定）：
+To ensure upstream code updates cannot rename the package and break this interoperability, the build **forces** the package identity with scripts (idempotent; follows upstream code while pinning the package name):
 
-- **SFA**：[scripts/pin_android_application_id.py](scripts/pin_android_application_id.py) 把 `app/build.gradle.kts` 的 `applicationId` 固定为 `io.reF1nd.sfa`。
-- **SFL**：[scripts/pin_desktop_package_name.py](scripts/pin_desktop_package_name.py) 把 `package.json` 的 `name`（deb `Package:` 的来源）固定为 `sing-box-for-desktop-ref1nd`、`desktopName` 固定为 `sing-box-reF1nd.desktop`，并把 `electron-builder.yml` 的 `appId` / `productName` / `linux.appId` / `linux.executableName` 固定。
+- **SFA**: [scripts/pin_android_application_id.py](scripts/pin_android_application_id.py) pins the `applicationId` in `app/build.gradle.kts` to `io.reF1nd.sfa`.
+- **SFL**: [scripts/pin_desktop_package_name.py](scripts/pin_desktop_package_name.py) pins `package.json`'s `name` (the source of the deb `Package:` field) to `sing-box-for-desktop-ref1nd`, `desktopName` to `sing-box-reF1nd.desktop`, and `electron-builder.yml`'s `appId` / `productName` / `linux.appId` / `linux.executableName`.
 
-除包名一致外，SFA 的 `versionCode` 使用统一基准（`SFA_VERSION_CODE_BASE + github.run_number`，同一次运行内两变体相同），SFL 的 deb 在版本不同时由 `dpkg` / `apt` 以覆盖（必要时降级）方式安装。据此可在两个变体间互相覆盖安装。
+Beyond the identical package name, the SFA `versionCode` uses a unified base (`SFA_VERSION_CODE_BASE + github.run_number`, identical for both variants within one run), and a SFL deb with a different version is installed over the existing one via `dpkg` / `apt` (downgrading if necessary). This allows either variant to be installed over the other.
 
-## 使用方法
+## Usage
 
-在仓库的 **Actions** 页面选择 **Build SFA & SFL** → **Run workflow**，按下方参数填写后运行。构建产物在该次运行的 Artifacts 中下载；当 `publish=true` 时，产物同时发布到 **Releases** 页面。
+On the repository's **Actions** page, pick **Build SFA & SFL** → **Run workflow**, fill in the parameters below and run. Build artifacts are downloadable from that run's Artifacts; when `publish=true` they are also published to the **Releases** page.
 
-### 运行参数
+### Run parameters
 
-| 参数 | 说明 |
+| Parameter | Description |
 | --- | --- |
 | `variant` | `both` / `xiaobaf14g` / `reF1nd` |
-| `target` | `both` / `sfa` / `sfl`（仅构建其中一类产物；默认 `both`） |
-| `version_xiaobaf14g` | xiaobaf14g 版本号（不含 `v`），如 `1.15.0-alpha.13-xiaobaf14g.11`；选 `xiaobaf14g` / `both` 时必填 |
-| `version_ref1nd` | reF1nd 版本号（不含 `v`）；选 `reF1nd` / `both` 时必填 |
-| `prerelease` | 是否将 Release 标记为 prerelease |
-| `publish` | 是否创建 / 更新 GitHub Release |
+| `target` | `both` / `sfa` / `sfl` (build only one artifact type; default `both`) |
+| `version_xiaobaf14g` | xiaobaf14g version (without `v`), e.g. `1.15.0-alpha.13-xiaobaf14g.11`; required when `xiaobaf14g` / `both` is selected |
+| `version_ref1nd` | reF1nd version (without `v`); required when `reF1nd` / `both` is selected |
+| `prerelease` | Whether to mark the Release as a prerelease |
+| `publish` | Whether to create / update a GitHub Release |
 
-两个变体的版本号分别由 `version_xiaobaf14g` / `version_ref1nd` 指定；`variant=both` 时两者均需填写。
+The versions of the two variants are set separately via `version_xiaobaf14g` / `version_ref1nd`; with `variant=both` both are required.
 
 ### Secrets
 
-签名相关材料以仓库 Secrets 形式提供，供 CI 打包时签名使用：
+Signing material is provided as repository Secrets for CI to sign packages:
 
-| Secret | 说明 |
+| Secret | Description |
 | --- | --- |
-| `SFA_KEYSTORE_FILE` | 安卓签名 keystore 的 base64（单行） |
-| `SFA_KEYSTORE_PASSWORD` | keystore 口令 |
-| `SFA_KEY_ALIAS` | 密钥别名 |
-| `SFA_KEY_PASSWORD` | 密钥口令（PKCS12 与 keystore 口令一致） |
-| `GPG_KEY` | SFL `.deb` 签名用 ASCII-armored 私钥（含 BEGIN/END 行） |
-| `GPG_KEY_ID` | 签名密钥指纹 |
-| `GPG_PASSPHRASE` | 私钥口令 |
+| `SFA_KEYSTORE_FILE` | base64 (single line) of the Android signing keystore |
+| `SFA_KEYSTORE_PASSWORD` | keystore password |
+| `SFA_KEY_ALIAS` | key alias |
+| `SFA_KEY_PASSWORD` | key password (same as the keystore password for PKCS12) |
+| `GPG_KEY` | ASCII-armored private key (with BEGIN/END lines) for signing the SFL `.deb` |
+| `GPG_KEY_ID` | signing key fingerprint |
+| `GPG_PASSPHRASE` | private key passphrase |
 
-> 签名材料应由维护者自行生成并妥善保管，切勿写入仓库文件或日志。
+> Signing material must be generated and kept by the maintainer; never write it into repository files or logs.
 
-### 在自有仓库部署（可选）
+### Deploy in your own repository (optional)
 
-如需在 fork 或独立仓库中复现本构建：
+To reproduce this build in a fork or a standalone repository:
 
-1. Fork 本仓库，或新建仓库并将本目录内容提交、推送。
-2. 在仓库 **Settings → Secrets and variables → Actions** 中配置上述 Secrets。
-3. 运行 **Actions → Build SFA & SFL → Run workflow**。
+1. Fork this repository, or create a new repository and commit / push this directory's contents.
+2. Under **Settings → Secrets and variables → Actions**, configure the Secrets above.
+3. Run **Actions → Build SFA & SFL → Run workflow**.
 
-## 工作流结构
+## Workflow structure
 
-- `resolve`：`scripts/matrix.py` 生成 `prepare` / `sfa` / `sfl` 矩阵，以及 `meta` / `tag` 输出（每个变体及其独立版本号封装在 `meta` 中）。发布 tag 以 version 中最后一个 `-` 之前的全部字段为基名（如 `1.15.0-alpha-reF1nd.11` → `1.15.0-alpha`）：`variant=both` 直接用基名（两变体须同基名以共用同一个 Release）；`variant=xiaobaf14g` / `variant=reF1nd` 在基名后再追加 `-xiaobaf14g` / `-reF1nd`。
-- `prepare`：按变体用 `go list -deps` 预热 `~/go/pkg/mod` 模块缓存（`lookup-only` 保存，供后续 job 与后续运行复用；预热步骤失败仅告警）。
-- `sfa-lib`：检出 core + 构建脚本 → `patch_build_libbox.py`（改标签、去 legacy）→ `make lib_install` + `build_libbox`（android/arm64）→ 上传 `libbox.aar`。
-- `sfa`：检出客户端 + 构建脚本 → `restrict_abi.py`（把 `splits.abi` 限定为仅 `arm64-v8a`）→ `pin_android_application_id.py`（固定 `applicationId`）→ 下载 `libbox.aar` 放入 `app/libs` → 更新 `version.properties` → 注入签名 → `./gradlew assembleOtherRelease`（不再传 `-Pandroid.injected.build.abi`）→ 上传 APK。
-- `sfl`：检出 core + 客户端 + 构建脚本 → `pin_desktop_package_name.py`（固定 deb 包名 / appId / 可执行名）→ 覆盖 `release/DEFAULT_BUILD_TAGS*` → Rust/Zig（wayland 原生模块）→ `pnpm package:linux -- deb x64`（`CC` 空、无 cronet）→ `debsigs` 签名 → 上传 `.deb`。
-- `publish`：汇总 apk / deb，生成发布页（名称、版本、构建标签、变体、来源 refs、产物表）并创建 / 更新 Release。单产物（`target=sfa`/`sfl`）运行也会发布。
+- `resolve`: `scripts/matrix.py` produces the `prepare` / `sfa` / `sfl` matrices plus the `meta` / `tag` outputs (each variant and its own version are wrapped in `meta`). The release tag uses everything before the last `-` of the version as its base (e.g. `1.15.0-alpha-reF1nd.11` → `1.15.0-alpha`): `variant=both` uses the bare base (both variants must share the base so they share one Release); `variant=xiaobaf14g` / `variant=reF1nd` append `-xiaobaf14g` / `-reF1nd` after the base.
+- `prepare`: per variant, warms the `~/go/pkg/mod` module cache with `go list -deps` (`lookup-only` save, reused by later jobs and later runs; a warm-up failure only warns).
+- `sfa-lib`: checks out core + builder scripts → `patch_build_libbox.py` (rewrite tags, drop legacy) → `make lib_install` + `build_libbox` (android/arm64) → uploads `libbox.aar`.
+- `sfa`: checks out the client + builder scripts → `restrict_abi.py` (limit `splits.abi` to `arm64-v8a` only) → `pin_android_application_id.py` (pin `applicationId`) → downloads `libbox.aar` into `app/libs` → updates `version.properties` → injects signing → `./gradlew assembleOtherRelease` (no `-Pandroid.injected.build.abi`) → uploads the APK.
+- `sfl`: checks out core + client + builder scripts → `pin_desktop_package_name.py` (pin deb package name / appId / executable name) → overwrites `release/DEFAULT_BUILD_TAGS*` → Rust/Zig (wayland native module) → `pnpm package:linux -- deb x64` (empty `CC`, no cronet) → `debsigs` signing → uploads the `.deb`.
+- `publish`: aggregates apk / deb, composes the release page (name, versions, build tags, variants, source refs, artifact table) and creates / updates the Release. Single-artifact (`target=sfa`/`sfl`) runs also publish.
 
-## 缓存与加速
+## Caching and speed
 
-- **Go 模块**：`prepare` 按变体用 `go list -deps` 预热 `~/go/pkg/mod`（`lookup-only` 保存），各构建 job 只 `actions/cache/restore` 复用。
-- **Go 编译缓存**：`~/.cache/go-build`，SFA / SFL 各自 `actions/cache`；主 key 按 `go.sum` + tags + variant（**不含提交 SHA**，只在依赖变化时才新增条目，避免随每次提交膨胀）；`restore-keys` 以 `gobuild-$os-<job>-<variant>-` 前缀回退，因此即便 `go.sum` 变化也能命中最近一次缓存、保持增量编译。
-- **Gradle**：`gradle/actions/setup-gradle`（`cache-provider: basic`）。
-- **pnpm / Node**：`actions/setup-node` 的 pnpm store 缓存 + `~/.cache/electron`、`~/.cache/electron-builder`。
-- **Rust**：`~/.cargo/registry`、`~/.cargo/git`、`clients/desktop/bin/wayland-menu-toolchain`（按 `Cargo.lock`）。
-- **Zig**：由 `mlugg/setup-zig` 自带缓存负责（早期基于 `~/.cache/zig` 的显式缓存步骤因该路径不存在恒 miss，已删除）。
-- **容量与淘汰**：GitHub Actions 缓存按仓库计，上限 **10 GiB**，超出按 LRU 淘汰；另有「7 天未访问自动清除」。当前占用远低于上限。
-- 所有 Actions 均钉到 commit SHA；各 job 设 `timeout-minutes`；`concurrency` 取消同参数并发旧运行；artifact 保留 7 天。
+- **Go modules**: `prepare` warms `~/go/pkg/mod` per variant with `go list -deps` (`lookup-only` save); each build job only `actions/cache/restore`s it.
+- **Go build cache**: `~/.cache/go-build`, cached separately for SFA / SFL; the primary key is `go.sum` + tags + variant (**without the commit SHA**, so entries are added only when dependencies change, avoiding growth on every commit); `restore-keys` fall back on the `gobuild-$os-<job>-<variant>-` prefix, so even when `go.sum` changes the most recent cache is hit and builds stay incremental.
+- **Gradle**: `gradle/actions/setup-gradle` (`cache-provider: basic`).
+- **pnpm / Node**: `actions/setup-node` pnpm store cache + `~/.cache/electron`, `~/.cache/electron-builder`.
+- **Rust**: `~/.cargo/registry`, `~/.cargo/git`, `clients/desktop/bin/wayland-menu-toolchain` (keyed on `Cargo.lock`).
+- **Zig**: handled by `mlugg/setup-zig`'s own cache (the earlier explicit `~/.cache/zig` cache step was removed because that path does not exist and always missed).
+- **Capacity and eviction**: GitHub Actions cache is per-repository with a **10 GiB** cap, evicting by LRU, plus automatic removal after 7 days without access. Current usage is far below the cap.
+- All Actions are pinned to commit SHAs; each job sets `timeout-minutes`; `concurrency` cancels older in-flight runs with the same parameters; artifacts are kept for 7 days.
 
-## 资源与运行器要求
+## Resource and runner requirements
 
-- SFA 的 Gradle 构建内存峰值较高（客户端 `gradle.properties` 默认 `org.gradle.jvmargs=-Xmx8192m`，即 8 GB 堆，叠加 Kotlin 编译守护进程、R8 与 Lint 的独立 JVM）。
-- 建议在 ≥ 4 vCPU / 16 GB 的 `ubuntu-latest` 运行器上构建；资源受限时可调低 Gradle 堆（如 `-Xmx3g`~`-Xmx4g`）、限制 `--max-workers`、跳过 release Lint（`-x lintVitalOtherRelease`）、增加 swap，或改用更大的自托管运行器。
-- SFL 运行于 `ubuntu-26.04`；受限环境可改用可用的 runner 标签。
+- SFA's Gradle build has a high memory peak (the client's `gradle.properties` defaults to `org.gradle.jvmargs=-Xmx8192m`, i.e. an 8 GB heap, on top of the Kotlin compile daemon, R8 and Lint's separate JVMs).
+- Building on a `ubuntu-latest` runner with ≥ 4 vCPU / 16 GB is recommended; under constrained resources, lower the Gradle heap (e.g. `-Xmx3g`~`-Xmx4g`), limit `--max-workers`, skip release Lint (`-x lintVitalOtherRelease`), add swap, or use a larger self-hosted runner.
+- SFL runs on `ubuntu-26.04`; constrained environments can switch to an available runner label.
 
-## 已知限制
+## Known limitations
 
-- reF1nd 的客户端仓库无 `reF1nd-testing-next` 分支，故 core 使用 `reF1nd-testing-next`，SFA 使用 `reF1nd-testing`，SFL 使用 `reF1nd-dev`。
-- SFA 通过 [scripts/restrict_abi.py](scripts/restrict_abi.py) 在构建前改写客户端 `app/build.gradle.kts` 的 `splits.abi.include(...)` 为仅 `arm64-v8a`（同时 `isUniversalApk=false`），从而只编 arm64、产物落在 `app/build/outputs/apk/other/release/`。不使用 `-Pandroid.injected.build.abi`：该 IDE 注入式参数会把产物导向 `intermediates/`，不产生可收集的签名 APK。
-- [patch_build_libbox.py](scripts/patch_build_libbox.py) 依赖 `build_libbox` 源码中 `sharedTags` 与 legacy 构建的既有结构；若上游改写导致不匹配，脚本会打印告警并按现状继续。
-- `build_libbox` 需 `make lib_install` 目标与 Android NDK r28+。
-- 本构建固定标签集去掉了上游 `sharedTags` 中的 `with_naive_outbound`，同时也去掉了 `ts_omit_*`、`with_wireguard` / `with_openvpn` / `with_openconnect` / `with_usbip` 等；因此产物不含这些特性，且 tailscale 以全特性编译（体积增大）。当前标签集下 SFA（`libbox.aar`）与 SFL 均已实测可成功编译。
-- 构建源码始终跟随各上游分支的最新提交（branch ref，不做 SHA 钉定）；`version_*` 输入仅用于命名与版本元数据，**不改变拉取/编译的代码**。因此相同输入在不同时间构建可能对应不同上游代码。若需可复现构建，可将 `scripts/matrix.py` 中的 `*_ref` 固定为具体 commit SHA / tag。
+- reF1nd's client repositories have no `reF1nd-testing-next` branch, so the core uses `reF1nd-testing-next`, SFA uses `reF1nd-testing`, and SFL uses `reF1nd-dev`.
+- SFA uses [scripts/restrict_abi.py](scripts/restrict_abi.py) to rewrite the client's `app/build.gradle.kts` so that `splits.abi.include(...)` covers only `arm64-v8a` (with `isUniversalApk=false`) before building, so only arm64 is built and artifacts land in `app/build/outputs/apk/other/release/`. It does not use `-Pandroid.injected.build.abi`: that IDE-injection parameter redirects artifacts into `intermediates/` and produces no collectable signed APK.
+- [patch_build_libbox.py](scripts/patch_build_libbox.py) relies on the existing structure of `sharedTags` and the legacy build in the `build_libbox` source; if upstream changes break the match, the script warns and continues as-is.
+- `build_libbox` requires a `make lib_install` target and Android NDK r28+.
+- This build's fixed tag set drops `with_naive_outbound` from the upstream `sharedTags`, and also drops `ts_omit_*`, `with_wireguard` / `with_openvpn` / `with_openconnect` / `with_usbip`, etc.; accordingly artifacts lack these features and tailscale is built with all features (larger size). With the current tag set, both SFA (`libbox.aar`) and SFL have been verified to compile successfully.
+- The build source always follows the latest commit of each upstream branch (branch ref, not pinned to a SHA); the `version_*` inputs only affect naming and version metadata and **do not change the code that is fetched/built**. So the same inputs at different times may build different upstream code. For reproducible builds, pin `*_ref` in `scripts/matrix.py` to a specific commit SHA / tag.
 
-## 许可证与致谢
+## License and credits
 
-本仓库自身仅包含构建编排脚本（workflow 与 Python 辅助脚本）。构建所依赖的 sing-box 及各 GUI 客户端源码版权归其各自作者所有，遵循各自仓库的开源许可证；分发的安装包为上述源码的构建产物，请一并遵守相应许可证。
+This repository itself contains only build-orchestration scripts (the workflow and Python helpers). The sing-box and GUI client sources it builds upon are copyrighted by their respective authors and follow their own open-source licenses; the distributed installers are build artifacts of those sources and must likewise comply with the corresponding licenses.
