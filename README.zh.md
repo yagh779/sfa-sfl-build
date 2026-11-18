@@ -22,10 +22,10 @@
 
 每次运行按所选变体产出以下文件：
 
-- **SFA**：`SFA-<version>-arm64-<variant>.apk` — Android，arm64，标准版（`other` flavor）
-- **SFL**：`SFL-<version>-x64-<variant>.deb` — Linux，amd64，GPG 签名
+- **SFA**：`SFA-<version>-arm64.apk` — Android，arm64，标准版（`other` flavor）
+- **SFL**：`SFL-<version>-x64.deb` — Linux，amd64，GPG 签名
 
-`variant=both` 时一次产出上述两类 × 两个变体（共 4 个文件）；`variant=xiaobaf14g` / `variant=reF1nd` 只构建单个变体；`target=sfa` / `target=sfl` 可只构建其中一类产物。
+`variant=both` 时一次产出上述两类 × 两个变体（共 4 个文件）；`variant=xiaobaf14g` / `variant=reF1nd` 只构建单个变体；`target=sfa` / `target=sfl` 可只构建其中一类产物。变体信息通常已包含在 `<version>` 中（如 `...-xiaobaf14g` / `...-reF1nd`），故各变体文件名互不相同。若两变体使用**相同**版本号，文件名会冲突，此时构建会追加变体后缀以避免重名：`SFA-<version>-arm64-<variant>.apk` / `SFL-<version>-x64-<variant>.deb`。
 
 ## 固定构建标签
 

@@ -376,8 +376,8 @@ jobs:
             -Pandroid.injected.signing.key.password="$RELEASE_KEY_PASSWORD"
       - name: Prepare upload
         env:
-          VARIANT: ${{ matrix.variant }}
           VERSION: ${{ matrix.version }}
+          SUFFIX: ${{ matrix.name_suffix }}
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
@@ -392,7 +392,7 @@ jobs:
           [ -z "$pick" ] && pick=$(find sfa-client -type f -name '*.apk' ! -name '*-unsigned.apk' ! -name '*-unaligned.apk' ! -path '*/intermediates/*' 2>/dev/null | head -n1 || true)
           [ -n "$pick" ] || { echo "::error::no signed release APK found under sfa-client"; exit 1; }
           echo "picked: $pick"
-          cp "$pick" "dist/SFA-${VERSION}-arm64-${VARIANT}.apk"
+          cp "$pick" "dist/SFA-${VERSION}-arm64${SUFFIX}.apk"
           ls -lh dist
       - name: Upload APK
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
@@ -577,7 +577,7 @@ jobs:
             clients/desktop/release/SFL-*.deb
       - name: Prepare upload
         env:
-          VARIANT: ${{ matrix.variant }}
+          SUFFIX: ${{ matrix.name_suffix }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -588,7 +588,7 @@ jobs:
           fi
           mkdir -p dist
           base="$(basename "${debs[0]}")"          # SFL-<version>-x64.deb
-          cp "${debs[0]}" "dist/${base%.deb}-${VARIANT}.deb"   # SFL-<version>-x64-<variant>.deb
+          cp "${debs[0]}" "dist/${base%.deb}${SUFFIX}.deb"   # SFL-<version>-x64[-<variant>].deb
           ls -lh dist
       - name: Upload .deb
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
@@ -678,7 +678,7 @@ jobs:
           L.append("## 安装 / 校验 (Install / verify)")
           L.append("")
           L.append("- **SFA**：`adb install <SFA-*.apk>`（仅 arm64-v8a，Android 7.0+/API 24+）。")
-          L.append("- **SFL**：`sudo apt install ./SFL-*-<variant>.deb`；`.deb` 已用 GPG 签名（debsigs / origin）。")
+          L.append("- **SFL**：`sudo apt install ./SFL-*.deb`；`.deb` 已用 GPG 签名（debsigs / origin）。")
           L.append("")
           body = "\n".join(L) + "\n"
           open("RELEASE_NOTES.md", "w", encoding="utf-8").write(body)

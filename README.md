@@ -22,10 +22,10 @@ The two variants come from branches maintained by different people and carry ind
 
 Each run produces the following files for the selected variant(s):
 
-- **SFA**: `SFA-<version>-arm64-<variant>.apk` — Android, arm64, standard (`other` flavor)
-- **SFL**: `SFL-<version>-x64-<variant>.deb` — Linux, amd64, GPG-signed
+- **SFA**: `SFA-<version>-arm64.apk` — Android, arm64, standard (`other` flavor)
+- **SFL**: `SFL-<version>-x64.deb` — Linux, amd64, GPG-signed
 
-With `variant=both` a single run produces both artifact types for both variants (4 files); `variant=xiaobaf14g` / `variant=reF1nd` build only a single variant; `target=sfa` / `target=sfl` build only one artifact type.
+With `variant=both` a single run produces both artifact types for both variants (4 files); `variant=xiaobaf14g` / `variant=reF1nd` build only a single variant; `target=sfa` / `target=sfl` build only one artifact type. The variant is normally carried by `<version>` (e.g. `...-xiaobaf14g` / `...-reF1nd`), so files stay distinct across variants. If both variants are given the **same** version, the file names would collide, so the build appends the variant to keep them unique: `SFA-<version>-arm64-<variant>.apk` / `SFL-<version>-x64-<variant>.deb`.
 
 ## Fixed build tags
 

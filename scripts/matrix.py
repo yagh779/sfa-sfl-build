@@ -53,8 +53,22 @@ def main() -> None:
         sys.exit(f"ERROR: missing version for variant(s): {', '.join(missing)}")
 
     sfa, sfl, prep, meta = [], [], [], []
+
+    # When two variants are built together and carry the SAME version string, their
+    # artifact file names would collide once the variant suffix is dropped. In that
+    # case re-append the "-<variant>" suffix to keep the names unique.
+    versions = [version_of[c["variant"]] for c in selected]
+    need_variant_suffix = len(selected) > 1 and len(set(versions)) == 1
+    if need_variant_suffix:
+        print(
+            "NOTE: both variants share the same version; artifact names will include "
+            "the '-<variant>' suffix to avoid a file-name collision",
+            file=sys.stderr,
+        )
+
     for c in selected:
         v = version_of[c["variant"]]
+        suffix = f"-{c['variant']}" if need_variant_suffix else ""
         meta.append({**c, "version": v})
         # prepare: one entry per variant, warms the shared Go module cache.
         prep.append({
@@ -63,11 +77,12 @@ def main() -> None:
             "core_ref": c["core_ref"],
         })
         # SFA: arm64 only, standard (non-legacy) flavor.
-        sfa.append({**c, "version": v, "flavor": "other", "task": ":app:assembleOtherRelease"})
+        sfa.append({**c, "version": v, "name_suffix": suffix, "flavor": "other", "task": ":app:assembleOtherRelease"})
         # SFL: amd64 only, deb package.
         sfl.append({
             **c,
             "version": v,
+            "name_suffix": suffix,
             "desktop_arch": "x64",
             "go_arch": "amd64",
             "rust_target": "x86_64-unknown-linux-gnu",
