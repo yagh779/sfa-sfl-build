@@ -58,6 +58,21 @@ How it is applied:
 - **SFL**: `scripts/sing-box.ts`'s `findBoxDirectory()` looks in `<client>/../..` for a directory whose `go.mod` has `module github.com/sagernet/sing-box`; `scripts/package.ts` calls the core's `go run ./cmd/internal/build_boxdd -target=linux/amd64` to build the daemon, then electron-builder packages the `.deb`.
   So the workflow checks out the core at the workspace root and the desktop client at `clients/desktop` (`<client>/../..` is the core root).
 
+## In-app update check
+
+The build repoints the client's hard-coded update source at **this repository's** GitHub Releases API (taken from `github.repository` of the running workflow):
+
+```
+https://api.github.com/repos/<owner>/<repo>/releases
+```
+
+`scripts/patch_update_url.py` rewrites the `RELEASES_URL` constant in the SFA `GitHubUpdateChecker` (`app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt`) and in the SFL `src/main/updates.ts`, so any fork automatically checks its own Releases.
+
+Behaviour notes:
+
+- **SFA**: each build embeds a `BuildConfig.SFA_VARIANT` constant and fetches its own release metadata asset `SFA-version-metadata-<variant>.json` (`{"version_code": <int>, "version_name": "<string>"}`), so every variant tracks its own version. The publish job writes one metadata file per built variant, with `version_code = SFA_VERSION_CODE_BASE + run_number` and `version_name` = that variant's own version. `scripts/patch_sfa_variant_field.py` injects the variant constant and `scripts/patch_sfa_update_variant.py` rewrites the checker to read the variant-specific metadata file and to select the APK whose name embeds this variant's exact version (falling back to the variant token), so per-variant updates stay correct even when one release carries several variants.
+- **SFL**: the desktop updater is only active on Windows (`UPDATES_SUPPORTED` requires `process.platform === "win32"`) and looks for `SFW-…-<arch>.exe` assets. On Linux the check is disabled, and this build produces no Windows artifacts.
+
 ## Repository layout
 
 ```
@@ -67,6 +82,9 @@ How it is applied:
 │   ├── matrix.py                          # builds prepare / sfa / sfl matrices and meta / tag from inputs
 │   ├── patch_build_libbox.py              # rewrites build_libbox tags and removes the legacy build
 │   ├── restrict_abi.py                    # rewrites the client splits.abi to build arm64-v8a only
+│   ├── patch_update_url.py                # points the client in-app update checker at this repo's Releases
+│   ├── patch_sfa_update_variant.py        # SFA updater: variant-specific metadata file + matching APK
+│   ├── patch_sfa_variant_field.py         # injects BuildConfig.SFA_VARIANT into the SFA client
 │   ├── pin_android_application_id.py      # pins SFA applicationId (same package name across variants)
 │   └── pin_desktop_package_name.py        # pins SFL deb package name / appId / executable name
 ├── .gitignore
@@ -131,7 +149,7 @@ To reproduce this build in a fork or a standalone repository:
 - `resolve`: `scripts/matrix.py` produces the `prepare` / `sfa` / `sfl` matrices plus the `meta` / `tag` outputs (each variant and its own version are wrapped in `meta`). The release tag uses everything before the last `-` of the version as its base (e.g. `1.15.0-alpha-reF1nd.11` → `1.15.0-alpha`): `variant=both` uses the bare base (both variants must share the base so they share one Release); `variant=xiaobaf14g` / `variant=reF1nd` append `-xiaobaf14g` / `-reF1nd` after the base.
 - `prepare`: per variant, warms the `~/go/pkg/mod` module cache with `go list -deps` (`lookup-only` save, reused by later jobs and later runs; a warm-up failure only warns).
 - `sfa-lib`: checks out core + builder scripts → `patch_build_libbox.py` (rewrite tags, drop legacy) → `make lib_install` + `build_libbox` (android/arm64) → uploads `libbox.aar`.
-- `sfa`: checks out the client + builder scripts → `restrict_abi.py` (limit `splits.abi` to `arm64-v8a` only) → `pin_android_application_id.py` (pin `applicationId`) → downloads `libbox.aar` into `app/libs` → updates `version.properties` → injects signing → `./gradlew assembleOtherRelease` (no `-Pandroid.injected.build.abi`) → uploads the APK.
+- `sfa`: checks out the client + builder scripts → `restrict_abi.py` (limit `splits.abi` to `arm64-v8a` only) → `pin_android_application_id.py` (pin `applicationId`) → downloads `libbox.aar` into `app/libs` → updates `version.properties` → injects signing → `./gradlew assembleOtherRelease` → uploads the APK.
 - `sfl`: checks out core + client + builder scripts → `pin_desktop_package_name.py` (pin deb package name / appId / executable name) → overwrites `release/DEFAULT_BUILD_TAGS*` → Rust/Zig (wayland native module) → `pnpm package:linux -- deb x64` (empty `CC`, no cronet) → `debsigs` signing → uploads the `.deb`.
 - `publish`: aggregates apk / deb, composes the release page (name, versions, build tags, variants, source refs, artifact table) and creates / updates the Release. Single-artifact (`target=sfa`/`sfl`) runs also publish.
 
@@ -142,8 +160,8 @@ To reproduce this build in a fork or a standalone repository:
 - **Gradle**: `gradle/actions/setup-gradle` (`cache-provider: basic`).
 - **pnpm / Node**: `actions/setup-node` pnpm store cache + `~/.cache/electron`, `~/.cache/electron-builder`.
 - **Rust**: `~/.cargo/registry`, `~/.cargo/git`, `clients/desktop/bin/wayland-menu-toolchain` (keyed on `Cargo.lock`).
-- **Zig**: handled by `mlugg/setup-zig`'s own cache (the earlier explicit `~/.cache/zig` cache step was removed because that path does not exist and always missed).
-- **Capacity and eviction**: GitHub Actions cache is per-repository with a **10 GiB** cap, evicting by LRU, plus automatic removal after 7 days without access. Current usage is far below the cap.
+- **Zig**: handled by `mlugg/setup-zig`'s own cache.
+- **Capacity and eviction**: GitHub Actions cache is per-repository with a **10 GiB** cap, evicting by LRU, plus automatic removal after 7 days without access.
 - All Actions are pinned to commit SHAs; each job sets `timeout-minutes`; `concurrency` cancels older in-flight runs with the same parameters; artifacts are kept for 7 days.
 
 ## Resource and runner requirements
@@ -155,10 +173,10 @@ To reproduce this build in a fork or a standalone repository:
 ## Known limitations
 
 - reF1nd's client repositories have no `reF1nd-testing-next` branch, so the core uses `reF1nd-testing-next`, SFA uses `reF1nd-testing`, and SFL uses `reF1nd-dev`.
-- SFA uses [scripts/restrict_abi.py](scripts/restrict_abi.py) to rewrite the client's `app/build.gradle.kts` so that `splits.abi.include(...)` covers only `arm64-v8a` (with `isUniversalApk=false`) before building, so only arm64 is built and artifacts land in `app/build/outputs/apk/other/release/`. It does not use `-Pandroid.injected.build.abi`: that IDE-injection parameter redirects artifacts into `intermediates/` and produces no collectable signed APK.
+- SFA uses [scripts/restrict_abi.py](scripts/restrict_abi.py) to rewrite the client's `app/build.gradle.kts` so that `splits.abi.include(...)` covers only `arm64-v8a` (with `isUniversalApk=false`) before building, so only arm64 is built and artifacts land in `app/build/outputs/apk/other/release/`.
 - [patch_build_libbox.py](scripts/patch_build_libbox.py) relies on the existing structure of `sharedTags` and the legacy build in the `build_libbox` source; if upstream changes break the match, the script warns and continues as-is.
 - `build_libbox` requires a `make lib_install` target and Android NDK r28+.
-- This build's fixed tag set drops `with_naive_outbound` from the upstream `sharedTags`, and also drops `ts_omit_*`, `with_wireguard` / `with_openvpn` / `with_openconnect` / `with_usbip`, etc.; accordingly artifacts lack these features and tailscale is built with all features (larger size). With the current tag set, both SFA (`libbox.aar`) and SFL have been verified to compile successfully.
+- This build's fixed tag set drops `with_naive_outbound` from the upstream `sharedTags`, and also drops `ts_omit_*`, `with_wireguard` / `with_openvpn` / `with_openconnect` / `with_usbip`, etc.; accordingly artifacts lack these features and tailscale is built with all features (larger size). Both SFA (`libbox.aar`) and SFL build successfully with this tag set.
 - The build source always follows the latest commit of each upstream branch (branch ref, not pinned to a SHA); the `version_*` inputs only affect naming and version metadata and **do not change the code that is fetched/built**. So the same inputs at different times may build different upstream code. For reproducible builds, pin `*_ref` in `scripts/matrix.py` to a specific commit SHA / tag.
 
 ## License and credits

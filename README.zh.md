@@ -58,6 +58,21 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,with_conn
 - **SFL**：`scripts/sing-box.ts` 的 `findBoxDirectory()` 在 `<client>/../..` 查找 `go.mod` 为 `module github.com/sagernet/sing-box` 的目录；`scripts/package.ts` 调 core 的 `go run ./cmd/internal/build_boxdd -target=linux/amd64` 编守护进程，再由 electron-builder 打成 `.deb`。
   因此工作流将 core 检出到工作区根，桌面客户端检出到 `clients/desktop`（`<client>/../..` 即 core 根）。
 
+## 应用内更新检查
+
+构建会把客户端中硬编码的更新源改写为**本仓库**的 GitHub Releases API（取自运行工作流的 `github.repository`）：
+
+```
+https://api.github.com/repos/<owner>/<repo>/releases
+```
+
+`scripts/patch_update_url.py` 会改写 SFA `GitHubUpdateChecker`（`app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt`）与 SFL `src/main/updates.ts` 中的 `RELEASES_URL` 常量，使任意 fork 自动检查各自仓库的 Releases。
+
+行为说明：
+
+- **SFA**：每个构建都内嵌 `BuildConfig.SFA_VARIANT` 常量，并读取自己的 Release 元数据资产 `SFA-version-metadata-<variant>.json`（`{"version_code": <int>, "version_name": "<string>"}`），因此各变体各自跟踪自己的版本。publish job 为每个已构建变体各写一份元数据：`version_code = SFA_VERSION_CODE_BASE + run_number`，`version_name` = 该变体自己的版本。`scripts/patch_sfa_variant_field.py` 注入变体常量，`scripts/patch_sfa_update_variant.py` 改写检查器以读取变体专属元数据文件，并优先选择文件名内含本变体精确版本的 `.apk`（再回退到变体标识），从而在单个 Release 承载多变体时仍能各自正确更新。
+- **SFL**：桌面端更新仅在 Windows 上启用（`UPDATES_SUPPORTED` 要求 `process.platform === "win32"`），并查找 `SFW-…-<arch>.exe` 资产；Linux 上该检查被禁用，本构建也不产出 Windows 产物。
+
 ## 仓库结构
 
 ```
@@ -67,6 +82,9 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,with_conn
 │   ├── matrix.py                          # 由输入生成 prepare / sfa / sfl 矩阵与 meta / tag
 │   ├── patch_build_libbox.py              # 重写 build_libbox 的标签并移除 legacy 构建
 │   ├── restrict_abi.py                    # 改写客户端 splits.abi，仅构建 arm64-v8a
+│   ├── patch_update_url.py                # 将客户端应用内更新检查指向本仓库 Releases
+│   ├── patch_sfa_update_variant.py        # SFA 更新：变体专属元数据文件 + 匹配对应 APK
+│   ├── patch_sfa_variant_field.py         # 向 SFA 客户端注入 BuildConfig.SFA_VARIANT
 │   ├── pin_android_application_id.py      # 固定 SFA 的 applicationId（跨变体同包名）
 │   └── pin_desktop_package_name.py        # 固定 SFL 的 deb 包名 / appId / 可执行名
 ├── .gitignore
@@ -131,7 +149,7 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,with_conn
 - `resolve`：`scripts/matrix.py` 生成 `prepare` / `sfa` / `sfl` 矩阵，以及 `meta` / `tag` 输出（每个变体及其独立版本号封装在 `meta` 中）。发布 tag 以 version 中最后一个 `-` 之前的全部字段为基名（如 `1.15.0-alpha-reF1nd.11` → `1.15.0-alpha`）：`variant=both` 直接用基名（两变体须同基名以共用同一个 Release）；`variant=xiaobaf14g` / `variant=reF1nd` 在基名后再追加 `-xiaobaf14g` / `-reF1nd`。
 - `prepare`：按变体用 `go list -deps` 预热 `~/go/pkg/mod` 模块缓存（`lookup-only` 保存，供后续 job 与后续运行复用；预热步骤失败仅告警）。
 - `sfa-lib`：检出 core + 构建脚本 → `patch_build_libbox.py`（改标签、去 legacy）→ `make lib_install` + `build_libbox`（android/arm64）→ 上传 `libbox.aar`。
-- `sfa`：检出客户端 + 构建脚本 → `restrict_abi.py`（把 `splits.abi` 限定为仅 `arm64-v8a`）→ `pin_android_application_id.py`（固定 `applicationId`）→ 下载 `libbox.aar` 放入 `app/libs` → 更新 `version.properties` → 注入签名 → `./gradlew assembleOtherRelease`（不再传 `-Pandroid.injected.build.abi`）→ 上传 APK。
+- `sfa`：检出客户端 + 构建脚本 → `restrict_abi.py`（把 `splits.abi` 限定为仅 `arm64-v8a`）→ `pin_android_application_id.py`（固定 `applicationId`）→ 下载 `libbox.aar` 放入 `app/libs` → 更新 `version.properties` → 注入签名 → `./gradlew assembleOtherRelease` → 上传 APK。
 - `sfl`：检出 core + 客户端 + 构建脚本 → `pin_desktop_package_name.py`（固定 deb 包名 / appId / 可执行名）→ 覆盖 `release/DEFAULT_BUILD_TAGS*` → Rust/Zig（wayland 原生模块）→ `pnpm package:linux -- deb x64`（`CC` 空、无 cronet）→ `debsigs` 签名 → 上传 `.deb`。
 - `publish`：汇总 apk / deb，生成发布页（名称、版本、构建标签、变体、来源 refs、产物表）并创建 / 更新 Release。单产物（`target=sfa`/`sfl`）运行也会发布。
 
@@ -142,8 +160,8 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,with_conn
 - **Gradle**：`gradle/actions/setup-gradle`（`cache-provider: basic`）。
 - **pnpm / Node**：`actions/setup-node` 的 pnpm store 缓存 + `~/.cache/electron`、`~/.cache/electron-builder`。
 - **Rust**：`~/.cargo/registry`、`~/.cargo/git`、`clients/desktop/bin/wayland-menu-toolchain`（按 `Cargo.lock`）。
-- **Zig**：由 `mlugg/setup-zig` 自带缓存负责（早期基于 `~/.cache/zig` 的显式缓存步骤因该路径不存在恒 miss，已删除）。
-- **容量与淘汰**：GitHub Actions 缓存按仓库计，上限 **10 GiB**，超出按 LRU 淘汰；另有「7 天未访问自动清除」。当前占用远低于上限。
+- **Zig**：由 `mlugg/setup-zig` 自带缓存负责。
+- **容量与淘汰**：GitHub Actions 缓存按仓库计，上限 **10 GiB**，超出按 LRU 淘汰；另有「7 天未访问自动清除」。
 - 所有 Actions 均钉到 commit SHA；各 job 设 `timeout-minutes`；`concurrency` 取消同参数并发旧运行；artifact 保留 7 天。
 
 ## 资源与运行器要求
@@ -155,10 +173,10 @@ with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,with_conn
 ## 已知限制
 
 - reF1nd 的客户端仓库无 `reF1nd-testing-next` 分支，故 core 使用 `reF1nd-testing-next`，SFA 使用 `reF1nd-testing`，SFL 使用 `reF1nd-dev`。
-- SFA 通过 [scripts/restrict_abi.py](scripts/restrict_abi.py) 在构建前改写客户端 `app/build.gradle.kts` 的 `splits.abi.include(...)` 为仅 `arm64-v8a`（同时 `isUniversalApk=false`），从而只编 arm64、产物落在 `app/build/outputs/apk/other/release/`。不使用 `-Pandroid.injected.build.abi`：该 IDE 注入式参数会把产物导向 `intermediates/`，不产生可收集的签名 APK。
+- SFA 通过 [scripts/restrict_abi.py](scripts/restrict_abi.py) 在构建前改写客户端 `app/build.gradle.kts` 的 `splits.abi.include(...)` 为仅 `arm64-v8a`（同时 `isUniversalApk=false`），从而只编 arm64、产物落在 `app/build/outputs/apk/other/release/`。
 - [patch_build_libbox.py](scripts/patch_build_libbox.py) 依赖 `build_libbox` 源码中 `sharedTags` 与 legacy 构建的既有结构；若上游改写导致不匹配，脚本会打印告警并按现状继续。
 - `build_libbox` 需 `make lib_install` 目标与 Android NDK r28+。
-- 本构建固定标签集去掉了上游 `sharedTags` 中的 `with_naive_outbound`，同时也去掉了 `ts_omit_*`、`with_wireguard` / `with_openvpn` / `with_openconnect` / `with_usbip` 等；因此产物不含这些特性，且 tailscale 以全特性编译（体积增大）。当前标签集下 SFA（`libbox.aar`）与 SFL 均已实测可成功编译。
+- 本构建固定标签集去掉了上游 `sharedTags` 中的 `with_naive_outbound`，同时也去掉了 `ts_omit_*`、`with_wireguard` / `with_openvpn` / `with_openconnect` / `with_usbip` 等；因此产物不含这些特性，且 tailscale 以全特性编译（体积增大）。当前标签集下 SFA（`libbox.aar`）与 SFL 均可成功构建。
 - 构建源码始终跟随各上游分支的最新提交（branch ref，不做 SHA 钉定）；`version_*` 输入仅用于命名与版本元数据，**不改变拉取/编译的代码**。因此相同输入在不同时间构建可能对应不同上游代码。若需可复现构建，可将 `scripts/matrix.py` 中的 `*_ref` 固定为具体 commit SHA / tag。
 
 ## 许可证与致谢
