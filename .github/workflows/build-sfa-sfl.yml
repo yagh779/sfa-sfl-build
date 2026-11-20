@@ -78,6 +78,8 @@ env:
   SFA_VERSION_CODE_BASE: '3009'
   # Fixed build tags: no with_naive_outbound (so no cronet toolchain needed).
   BUILD_TAGS: 'with_quic,with_dhcp,with_utls,with_clash_api,with_tailscale,with_xhttp,with_conntrack,badlinkname,tfogo_checklinkname0'
+  # In-app update check points at THIS repository's GitHub Releases API.
+  UPDATE_RELEASES_URL: https://api.github.com/repos/${{ github.repository }}/releases
 
 jobs:
   # ── 0) Resolve variant x target matrices ────────────────────────────
@@ -275,6 +277,14 @@ jobs:
         with:
           repository: ${{ github.repository }}
           path: .ci
+      - name: Patch variant field (SFA)
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          python3 .ci/scripts/patch_sfa_variant_field.py sfa-client/app/build.gradle.kts "$VARIANT"
+          echo "--- SFA_VARIANT (after patch) ---"
+          grep -n 'SFA_VARIANT' sfa-client/app/build.gradle.kts | head -n 2
       - name: Restrict ABI to arm64-v8a
         run: |
           set -euo pipefail
@@ -287,6 +297,21 @@ jobs:
           python3 .ci/scripts/pin_android_application_id.py sfa-client/app/build.gradle.kts
           echo "--- applicationId (after pin) ---"
           grep -n 'applicationId' sfa-client/app/build.gradle.kts | head -n 3
+      - name: Patch update URL (SFA)
+        run: |
+          set -euo pipefail
+          python3 .ci/scripts/patch_update_url.py \
+            sfa-client/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt \
+            "${{ env.UPDATE_RELEASES_URL }}"
+          echo "--- RELEASES_URL (after patch) ---"
+          grep -n 'RELEASES_URL =' sfa-client/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt | head -n 2
+      - name: Patch update APK selection for variant (SFA)
+        run: |
+          set -euo pipefail
+          python3 .ci/scripts/patch_sfa_update_variant.py \
+            sfa-client/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
+          echo "--- variant metadata + APK selection (after patch) ---"
+          grep -n 'SFA-version-metadata-${BuildConfig.SFA_VARIANT}\|apkCandidates' sfa-client/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt | head -n 3
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
@@ -440,6 +465,14 @@ jobs:
           echo "--- deb package identity (after pin) ---"
           python3 -c "import json;print('package name:', json.load(open('clients/desktop/package.json'))['name'])"
           grep -nE '^(appId|productName):|^  appId:|^  executableName:' clients/desktop/electron-builder.yml
+      - name: Patch update URL (SFL)
+        run: |
+          set -euo pipefail
+          python3 .ci/scripts/patch_update_url.py \
+            clients/desktop/src/main/updates.ts \
+            "${{ env.UPDATE_RELEASES_URL }}"
+          echo "--- RELEASES_URL (after patch) ---"
+          grep -n 'RELEASES_URL =' clients/desktop/src/main/updates.ts | head -n 2
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
@@ -615,6 +648,37 @@ jobs:
           path: builds
           pattern: '!libbox-*'
           merge-multiple: true
+      - name: Generate SFA update metadata
+        env:
+          CODE_BASE: ${{ env.SFA_VERSION_CODE_BASE }}
+          RUN_NUMBER: ${{ github.run_number }}
+          META: ${{ needs.resolve.outputs.meta }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(builds/SFA-*.apk)
+          if (( ${#apks[@]} == 0 )); then
+            echo "no SFA APK present; skipping update metadata"
+            exit 0
+          fi
+          python3 - "$CODE_BASE" "$RUN_NUMBER" "$META" <<'PY'
+          import json, glob, os, sys
+          base, run = int(sys.argv[1]), int(sys.argv[2])
+          meta = json.loads(sys.argv[3] or "[]")
+          apks = [os.path.basename(p) for p in glob.glob("builds/SFA-*.apk")]
+          if not meta:
+              sys.exit("ERROR: no variant metadata to index")
+          for m in meta:
+              variant, version = m["variant"], m["version"]
+              if not any(version in name for name in apks):
+                  print("skip %s: no matching APK for version %s" % (variant, version))
+                  continue
+              payload = {"version_code": base + run, "version_name": version}
+              out = "builds/SFA-version-metadata-%s.json" % variant
+              with open(out, "w", encoding="utf-8") as f:
+                  json.dump(payload, f)
+              print("wrote", out, json.dumps(payload))
+          PY
       - name: Compose release notes
         id: notes
         env:
